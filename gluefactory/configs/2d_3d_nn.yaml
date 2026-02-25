@@ -1,0 +1,15 @@
+model:
+    name: matchers.nearest_neighbor_matcher
+    do_mutual_check: true
+    ratio_threshold: 0.8
+train:
+    seed: 1
+    epochs: 0 
+    eval_every_iter: 1
+data:
+    name: mega_2d3d_dataset
+    root: "/proj/vlarsson/outputs"
+    split_train: "splits/val.txt"
+    split_val: "splits/val.txt"
+    batch_size: 1
+    num_workers: 4
