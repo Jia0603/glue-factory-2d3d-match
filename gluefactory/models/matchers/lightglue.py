@@ -38,6 +38,22 @@ def normalize_keypoints(
     kpts = (kpts - shift[..., None, :]) / scale[..., None, None]
     return kpts
 
+@AMP_CUSTOM_FWD_F32
+def normalize_3d_with_quantile(
+    kpts: torch.Tensor, quantile_value:float=0.975
+) -> torch.Tensor:
+    upper_bound = torch.quantile(kpts, quantile_value, dim=-2, keepdim=True)
+    lower_bound = torch.quantile(kpts, 1 - quantile_value, dim=-2, keepdim=True)
+    
+    shift = (upper_bound + lower_bound) / 2
+    dist = (upper_bound - lower_bound)
+    scale = dist.max(dim=-1, keepdim=True).values / 2.0
+    # scale = dist / 2.0 # Sclale each dimension independently, a method need to be test with
+    scale = torch.clamp(scale, min=1e-6)
+
+    kpts_norm = (kpts - shift) / scale
+
+    return kpts_norm
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     x = x.unflatten(-1, (-1, 2))
@@ -440,6 +456,17 @@ class LightGlue(nn.Module):
                 [self.confidence_threshold(i) for i in range(self.conf.n_layers)]
             ),
         )
+        is_frozen = self.conf.get("freeze_backbone", False)
+        if is_frozen:
+            print("[*] Manual Log: Freezing Backbone, only training posenc3d.")
+        else:
+            print("[*] Manual Log: Unfreezing everything for full fine-tuning.")
+
+        for name, param in self.named_parameters():
+            if "posenc3d" in name:
+                param.requires_grad = True 
+            else:
+                param.requires_grad = not is_frozen
 
     def compile(self, mode="reduce-overhead"):
         if self.conf.width_confidence != -1:
@@ -456,13 +483,6 @@ class LightGlue(nn.Module):
     def forward(self, data: dict) -> dict:
         for key in self.required_data_keys:
             assert key in data, f"Missing key {key} in data"
-        # freeze backbone except posenc3d
-        if self.conf.get("freeze_backbone", False):
-            for name, param in self.named_parameters():
-                if "posenc3d" not in name:
-                    param.requires_grad = False
-                else:
-                    param.requires_grad = True
 
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
         b, m, _ = kpts0.shape
@@ -482,7 +502,8 @@ class LightGlue(nn.Module):
             size1_3d = torch.clamp(size1_3d, min=1e-6)
             size1 = size1_3d
         kpts0 = normalize_keypoints(kpts0, size0).clone()
-        kpts1 = normalize_keypoints(kpts1, size1).clone()
+        # kpts1 = normalize_keypoints(kpts1, size1).clone()
+        kpts1 = normalize_3d_with_quantile(kpts1, quantile_value=0.975).clone()
 
         if self.conf.add_scale_ori:
             sc0, o0 = data["scales0"], data["oris0"]
