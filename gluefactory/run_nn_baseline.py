@@ -3,6 +3,7 @@ from tqdm import tqdm
 from gluefactory.datasets import get_dataset
 from gluefactory.models import get_model
 import numpy as np
+from omegaconf import OmegaConf
 
 def run_nn_eval():
 
@@ -10,7 +11,8 @@ def run_nn_eval():
         "model": {
             "name": "matchers.nearest_neighbor_matcher",
             "do_mutual_check": True,
-            "ratio_threshold": 0.8,
+            "ratio_thresh": 0.9,
+            "distance_thresh": 5.0,
         },
         "data": {
             "name": "mega_2d3d_dataset",
@@ -27,7 +29,11 @@ def run_nn_eval():
     dataset = get_dataset(conf["data"]["name"])(conf["data"])
     loader = dataset.get_data_loader("val")
 
-    model = get_model(conf["model"]["name"])(conf["model"]).to(device).eval()
+    ModelClass = get_model(conf["model"]["name"])
+    full_conf = OmegaConf.merge(ModelClass.default_conf, conf["model"])
+    model = ModelClass(full_conf).to(device).eval()
+    print(f"Verified Threshold: {model.conf.ratio_thresh}")
+    # model = get_model(conf["model"]["name"])(conf["model"]).to(device).eval()
 
     results = {
         "num_matches": [],
@@ -46,26 +52,24 @@ def run_nn_eval():
         matches = pred['matches0'][0] # [N]
         gt_matches = data['gt_matches0'][0] # [N]
         
-        valid_matches = (matches > -1)
         correct_matches = (matches == gt_matches) & (gt_matches > -1)
         
-        num_pred = valid_matches.sum().item()
+        num_pred = (matches > -1).sum().item()
         num_gt = (gt_matches > -1).sum().item()
         num_correct = correct_matches.sum().item()
 
-        precision = num_correct / num_pred if num_pred > 0 else 0
-        recall = num_correct / num_gt if num_gt > 0 else 0
+        precision = num_correct / (1e-8 + num_pred)
+        recall = num_correct / (1e-8 + num_gt)
         
-
         results["num_matches"].append(num_pred)
         results["precision"].append(precision)
         results["recall"].append(recall)
 
     print("\n" + "="*30)
-    print(f"NN Baseline Results (Ratio={conf['model']['ratio_threshold']}):")
+    print(f"NN Baseline Results (Ratio={conf['model']['ratio_thresh']}):")
     print(f"Average Matches:   {np.mean(results['num_matches']):.2f}")
-    print(f"Average Precision: {np.mean(results['precision']):.4f}")
-    print(f"Average Recall:    {np.mean(results['recall']):.4f}")
+    print(f"Match Precision: {np.mean(results['precision']):.4f}")
+    print(f"Match Recall:    {np.mean(results['recall']):.4f}")
     print("="*30)
 
 if __name__ == "__main__":

@@ -51,7 +51,7 @@ def normalize_3d_with_quantile(
     # scale = dist / 2.0 # Sclale each dimension independently, a method need to be test with
     scale = torch.clamp(scale, min=1e-6)
 
-    kpts_norm = (kpts - shift) / scale
+    kpts_norm = (kpts - shift) / scale * (2 * quantile_value - 1)
 
     return kpts_norm
 
@@ -128,7 +128,6 @@ class Attention(nn.Module):
         if mask is not None:
             if mask.dim() < 4:
                 mask = mask.view(mask.shape[0], 1, 1, -1)
-        
         assert mask.shape[-1] == k.shape[-2], f"Mask length {mask.shape[-1]} != Key length {k.shape[-2]}"
 
         if self.enable_flash and q.device.type == "cuda":
@@ -194,7 +193,8 @@ class CrossBlock(nn.Module):
         dim_head = embed_dim // num_heads
         self.scale = dim_head**-0.5
         inner_dim = dim_head * num_heads
-        self.to_qk = nn.Linear(embed_dim, inner_dim, bias=bias)
+        self.to_q = nn.Linear(embed_dim, inner_dim, bias=bias)
+        self.to_k = nn.Linear(embed_dim, inner_dim, bias=bias)
         self.to_v = nn.Linear(embed_dim, inner_dim, bias=bias)
         self.to_out = nn.Linear(inner_dim, embed_dim, bias=bias)
         self.ffn = nn.Sequential(
@@ -212,41 +212,32 @@ class CrossBlock(nn.Module):
         return func(x0), func(x1)
 
     def forward(
-        self, x0: torch.Tensor, x1: torch.Tensor, mask0: Optional[torch.Tensor] = None, mask1: Optional[torch.Tensor] = None
-    ) -> List[torch.Tensor]:
-        qk0, qk1 = self.map_(self.to_qk, x0, x1)
-        v0, v1 = self.map_(self.to_v, x0, x1)
-        qk0, qk1, v0, v1 = map(
+            self, x0: torch.Tensor, x1: torch.Tensor, mask: Optional[torch.Tensor] = None
+            ) -> List[torch.Tensor]:
+        q = self.to_q(x0)
+        k = self.to_k(x1)
+        v = self.to_v(x1)
+        
+        q, k, v = map(
             lambda t: t.unflatten(-1, (self.heads, -1)).transpose(1, 2),
-            (qk0, qk1, v0, v1),
+            (q, k, v),
         )
-        if self.flash is not None and qk0.device.type == "cuda":
-            m0 = self.flash(qk0, qk1, v1, mask1)
-            m1 = self.flash(qk1, qk0, v0, mask0)
-            # m1 = self.flash(
-            #     qk1, qk0, v0, mask.transpose(-1, -2) if mask is not None else None
-            # )
-        else:
-            batch_size = x0.shape[0]
-            mask = None
-            if mask0 is not None and mask1 is not None:
-                mask = mask0.view(batch_size, 1, -1, 1) & mask1.view(batch_size, 1, 1, -1)
-                
-            qk0, qk1 = qk0 * self.scale**0.5, qk1 * self.scale**0.5
-            sim = torch.einsum("bhid, bhjd -> bhij", qk0, qk1)
+        if self.flash is not None and q.device.type == "cuda":
+            m0 = self.flash(q, k, v, mask)
+            
+        else:               
+            q, k = q * self.scale**0.5, k * self.scale**0.5
+            sim = torch.einsum("bhid, bhjd -> bhij", q, k)
             if mask is not None:
                 sim = sim.masked_fill(~mask, -float("inf"))
             attn01 = F.softmax(sim, dim=-1)
-            attn10 = F.softmax(sim.transpose(-2, -1).contiguous(), dim=-1)
-            m0 = torch.einsum("bhij, bhjd -> bhid", attn01, v1)
-            m1 = torch.einsum("bhji, bhjd -> bhid", attn10.transpose(-2, -1), v0)
+            m0 = torch.einsum("bhij, bhjd -> bhid", attn01, v)
             if mask is not None:
-                m0, m1 = m0.nan_to_num(), m1.nan_to_num()
-        m0, m1 = self.map_(lambda t: t.transpose(1, 2).flatten(start_dim=-2), m0, m1)
-        m0, m1 = self.map_(self.to_out, m0, m1)
+                m0 = m0.nan_to_num()
+        m0 = m0.transpose(1, 2).flatten(start_dim=-2)
+        m0 = self.to_out(m0)
         x0 = x0 + self.ffn(torch.cat([x0, m0], -1))
-        x1 = x1 + self.ffn(torch.cat([x1, m1], -1))
-        return x0, x1
+        return x0
 
 
 class TransformerLayer(nn.Module):
@@ -254,6 +245,8 @@ class TransformerLayer(nn.Module):
         super().__init__()
         self.self_attn = SelfBlock(*args, **kwargs)
         self.cross_attn = CrossBlock(*args, **kwargs)
+        self.self_attn3d = SelfBlock(*args, **kwargs)
+        self.cross_attn3d = CrossBlock(*args, **kwargs)
 
     def forward(
         self,
@@ -268,8 +261,8 @@ class TransformerLayer(nn.Module):
             return self.masked_forward(desc0, desc1, encoding0, encoding1, mask0, mask1)
         else:
             desc0 = self.self_attn(desc0, encoding0)
-            desc1 = self.self_attn(desc1, encoding1)
-            return self.cross_attn(desc0, desc1)
+            desc1 = self.self_attn3d(desc1, encoding1)
+            return self.cross_attn(desc0, desc1), self.cross_attn3d(desc1, desc0)
 
     # This part is compiled and allows padding inputs
     def masked_forward(self, desc0, desc1, encoding0, encoding1, mask0, mask1):
@@ -277,9 +270,9 @@ class TransformerLayer(nn.Module):
         # mask0 = mask0 & mask0.transpose(-1, -2)
         # mask1 = mask1 & mask1.transpose(-1, -2)
         desc0 = self.self_attn(desc0, encoding0, mask0)
-        desc1 = self.self_attn(desc1, encoding1, mask1)
+        desc1 = self.self_attn3d(desc1, encoding1, mask1)
         # return self.cross_attn(desc0, desc1, mask)
-        return self.cross_attn(desc0, desc1, mask0, mask1)
+        return self.cross_attn(desc0, desc1, mask1), self.cross_attn3d(desc1, desc0, mask0)
 
 
 def sigmoid_log_double_softmax(
@@ -360,9 +353,9 @@ def filter_matches(scores: torch.Tensor, th: float):
     return m0, m1, mscores0, mscores1
 
 
-class LightGlue(nn.Module):
+class LightGlu3D(nn.Module):
     default_conf = {
-        "name": "lightglue",  # just for interfacing
+        "name": "lightglu3d",  # just for interfacing
         "input_dim": 256,  # input descriptor dimension (autoselected from weights)
         "add_scale_ori": False,
         "descriptor_dim": 256,
@@ -456,30 +449,6 @@ class LightGlue(nn.Module):
                 [self.confidence_threshold(i) for i in range(self.conf.n_layers)]
             ),
         )
-        
-
-        for _, param in self.named_parameters():
-                param.requires_grad = True
-
-        if self.conf.get("freeze_backbone", False):
-            unfreeze_keywords = ["posenc3d", "transformers.7", "transformers.8"]
-            print(f"[*] Manual Log: Freeze Backbone, except for: {unfreeze_keywords}")
-
-            for name, param in self.named_parameters():
-    
-                if not any(key in name for key in unfreeze_keywords):
-                    param.register_hook(lambda grad: torch.zeros_like(grad))
-
-        #     for name, param in self.named_parameters():
-        #         if any(key in name for key in unfreeze_keywords):
-        #             param.requires_grad = True
-        #             # print(f"[*] Manual Log: Unfrozen parameter: {name}") # only for debugging
-        #         else:
-        #             param.requires_grad = False
-        else:
-            print("[*] Manual Log: Unfreeze mode. Training everything.")
-        #     for _, param in self.named_parameters():
-        #         param.requires_grad = True
 
     def compile(self, mode="reduce-overhead"):
         if self.conf.width_confidence != -1:
@@ -747,4 +716,4 @@ class LightGlue(nn.Module):
         return losses, metrics
 
 
-__main_model__ = LightGlue
+__main_model__ = LightGlu3D

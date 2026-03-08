@@ -71,6 +71,8 @@ default_train_conf = {
     "pr_curves": {},
     "plot": None,
     "submodules": [],
+    "freeze_2d": False, # whether to freeze the 2D weights when training LightGlu3D
+    "initial_3d_with_2d": False, # whether to initialize the 3D weights with the 2D pretrained weight when training LightGlu3D
 }
 default_train_conf = OmegaConf.create(default_train_conf)
 
@@ -216,7 +218,82 @@ def write_image_summaries(writer, name, figures, step):
         for k, fig in figures.items():
             writer.add_figure(f"{name}/{k}", fig, step)
 
+def initialize_3d_and_freeze_2d(model, init_cp=None, freeze_2d=False, initial_3d_with_2d=True, is_restoring=False):
+    m = model.module if hasattr(model, "module") else model
+    if not is_restoring:
+        if init_cp is not None:
+            sd = init_cp["model"]
+            for i, layer in enumerate(m.transformers):
+                qk_w_key = f"cross_attn.{i}.to_qk.weight"
+                qk_b_key = f"cross_attn.{i}.to_qk.bias"
+                v_w_key = f"cross_attn.{i}.to_v.weight"
+                v_b_key = f"cross_attn.{i}.to_v.bias"
+                
+                if qk_w_key in sd:
+                    with torch.no_grad():
+                        try:
+                            layer.cross_attn.to_q.weight.copy_(sd[qk_w_key])
+                            layer.cross_attn.to_q.bias.copy_(sd[qk_b_key])
+                            layer.cross_attn3d.to_k.weight.copy_(sd[qk_w_key])
+                            layer.cross_attn3d.to_k.bias.copy_(sd[qk_b_key])
+                            layer.cross_attn3d.to_v.weight.copy_(sd[v_w_key])
+                            layer.cross_attn3d.to_v.bias.copy_(sd[v_b_key])
+                            if i == 0:
+                                print(f"Initialized 2D-source cross-attn weights.")
+                        except Exception as e:
+                            print(f"Failed to initialize 2D-source weights for layer {i}: {e}")
+                    
+                        if initial_3d_with_2d:
+                            try:
+                                layer.self_attn3d.load_state_dict(layer.self_attn.state_dict())
+                                layer.cross_attn3d.to_q.weight.copy_(sd[qk_w_key])
+                                layer.cross_attn3d.to_q.bias.copy_(sd[qk_b_key])
+                                layer.cross_attn.to_k.weight.copy_(sd[qk_w_key])
+                                layer.cross_attn.to_k.bias.copy_(sd[qk_b_key])
+                                layer.cross_attn3d.to_out.load_state_dict(layer.cross_attn.to_out.state_dict())
+                                layer.cross_attn3d.ffn.load_state_dict(layer.cross_attn.ffn.state_dict())
+                                if i==0:
+                                    print(f"Initialized 3D-source cross-attn weights with 2D weights.")
+                            except Exception as e:
+                                print(f"Failed to initialize 3D-source weights with 2D weights for layer {i}: {e}")
 
+                else:
+                    print(f"WARNING: qk_w_key {qk_w_key} not found in layer{i}.")
+        else:
+            print("WARNING: Failed to initialize weights.")
+        if initial_3d_with_2d:
+            dict_3d = m.posenc3d.state_dict()
+            for name, param in m.posenc.state_dict().items():
+                if name in dict_3d:
+                    if param.shape == dict_3d[name].shape:
+                        dict_3d[name].copy_(param)
+                    elif "weight" in name and param.dim() == 2:
+                        in_dim_src = param.shape[1]
+                        in_dim_dst = dict_3d[name].shape[1]
+                        # copy the 2d posenc weights to the first two dimensions of posenc3d
+                        if in_dim_src < in_dim_dst:
+                            dict_3d[name][:, :in_dim_src].copy_(param)
+                            print(f"Copy for {name}: {in_dim_src} dims copied to {in_dim_dst} dims.")
+                        else:
+                            print(f"Skipping {name} due to incompatible shapes.")
+            m.posenc3d.load_state_dict(dict_3d)
+        else: 
+             print("Skipping 3D posenc weights initialization (not enabled in config).")
+            
+    else:
+        print("Restore mode: Using weights from checkpoint.")
+    
+    if freeze_2d:
+        for name, param in m.named_parameters():
+            if any(x in name for x in ["self_attn.", "posenc."]) and "3d" not in name:
+                param.requires_grad = False
+            if any(x in name for x in ["cross_attn.to_q", "cross_attn3d.to_k", "cross_attn3d.to_v"]):
+                param.requires_grad = False
+        print("Frozen 2D-source projection layers, allowing 3D-source layers to adapt.")
+    else:
+        for name, param in m.named_parameters():
+            param.requires_grad = True
+        print("2D weights are UNFROZEN.")
 def training(rank, conf, output_dir, args):
     if args.restore:
         logger.info(f"Restoring from previous training of {args.experiment}")
@@ -225,8 +302,11 @@ def training(rank, conf, output_dir, args):
         except AssertionError:
             init_cp = get_best_checkpoint(args.experiment)
         logger.info(f"Restoring from checkpoint {init_cp.name}")
+        # init_cp = torch.load(
+        #     str(init_cp), map_location="cpu", weights_only=not settings.ALLOW_PICKLE
+        # )
         init_cp = torch.load(
-            str(init_cp), map_location="cpu", weights_only=not settings.ALLOW_PICKLE
+            str(init_cp), map_location="cpu", weights_only=False
         )
         conf = OmegaConf.merge(OmegaConf.create(init_cp["conf"]), conf)
         conf.train = OmegaConf.merge(default_train_conf, conf.train)
@@ -234,8 +314,11 @@ def training(rank, conf, output_dir, args):
 
         # get the best loss or eval metric from the previous best checkpoint
         best_cp = get_best_checkpoint(args.experiment)
+        # best_cp = torch.load(
+        #     str(best_cp), map_location="cpu", weights_only=not settings.ALLOW_PICKLE
+        # )
         best_cp = torch.load(
-            str(best_cp), map_location="cpu", weights_only=not settings.ALLOW_PICKLE
+            str(best_cp), map_location="cpu", weights_only=False
         )
         best_eval = best_cp["eval"][conf.train.best_key]
         del best_cp
@@ -329,14 +412,42 @@ def training(rank, conf, output_dir, args):
     stop = False
     signal.signal(signal.SIGINT, sigint_handler)
     model = get_model(conf.model.name)(conf.model).to(device)
+
+    if init_cp is not None:
+        model.load_state_dict(init_cp["model"], strict=False)
+
+    raw_model = model.module if hasattr(model, "module") else model
+    if "lightglu3d" in raw_model.__class__.__name__.lower():
+        init_cp = None
+        weights_path = conf.model.get("weights") 
+        if weights_path:
+            logger.info(f"Loading weights from {weights_path} for manual stitching...")
+            init_cp = torch.load(weights_path, map_location="cpu")
+            if "model" not in init_cp:
+                init_cp = {"model": init_cp}
+                
+        initialize_3d_and_freeze_2d(
+            model,
+            init_cp=init_cp, 
+            freeze_2d=conf.train.freeze_2d, 
+            initial_3d_with_2d=conf.train.initial_3d_with_2d,
+            is_restoring=args.restore
+        )
+
     if args.compile:
         model = torch.compile(model, mode=args.compile)
     loss_fn = model.loss
-    if init_cp is not None:
-        model.load_state_dict(init_cp["model"], strict=False)
+    # logger for debugging
+    if rank == 0:
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        logger.info(f"Model initialized: Trainable={trainable_params/1e6:.2f}M, Frozen={frozen_params/1e6:.2f}M")
+    
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device])
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[device],find_unused_parameters=conf.train.get("freeze_2d", False)
+            )
     if rank == 0 and args.print_arch:
         logger.info(f"Model: \n{model}")
 

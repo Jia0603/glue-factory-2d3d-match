@@ -3,7 +3,7 @@ experiment:
   seed: 0
 
 model:
-  name: lightglue
+  name: lightglu3d
   weights: "/home/x_jiagu/glue-factory/superpoint_lightglue.pth"
   input_dim: 256
   descriptor_dim: 256
@@ -11,7 +11,6 @@ model:
   num_heads: 4
   flash: True
   checkpointed: True
-  freeze_backbone: False
   mp: True
   filter_threshold: 0.1
   loss:
@@ -25,7 +24,7 @@ data:
   split_train: "splits/train.txt"
   split_val: "splits/val.txt"
   split_test: "splits/test.txt"
-  batch_size: 16
+  batch_size: 2
   num_workers: 4
 
 train:
@@ -39,7 +38,8 @@ train:
     options:
       milestones: [12, 19]
       gamma: 0.5
-
+  freeze_2d: True
+  initial_3d_with_2d: True
   log_every_iter: 50    
   eval_every_iter: 200
   save_every_iter: 400
