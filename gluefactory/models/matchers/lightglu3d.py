@@ -222,6 +222,12 @@ class CrossBlock(nn.Module):
             lambda t: t.unflatten(-1, (self.heads, -1)).transpose(1, 2),
             (q, k, v),
         )
+        if mask is not None:
+            if mask.dim() == 2:
+                mask = mask[:, None, None, :]
+            elif mask.dim() == 3:
+                mask = mask[:, None, :, :]
+
         if self.flash is not None and q.device.type == "cuda":
             m0 = self.flash(q, k, v, mask)
             
@@ -410,7 +416,8 @@ class LightGlu3D(nn.Module):
         self.loss_fn = NLLLoss(conf.loss)
 
         state_dict = None
-        if conf.weights is not None:
+        is_restoring = conf.get("is_restoring", False)
+        if conf.weights is not None and not is_restoring:
             # weights can be either a path or an existing file from official LG
             if Path(conf.weights).exists():
                 state_dict = torch.load(conf.weights, map_location="cpu")

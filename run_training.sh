@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -A berzelius-2025-319 
 #SBATCH -J train_lightglu3d 
-#SBATCH --gres=gpu:a100-sxm4-80gb:1 
-#SBATCH -w node[061-093]         
+#SBATCH --nodes=1 
+#SBATCH --nodelist=node[061-063,065-082,084-093]         
 #SBATCH -t 00-24:00:00               
 #SBATCH -o /home/x_jiagu/degree_project/log_file/train_lightglu3d_unfre%j.log
 

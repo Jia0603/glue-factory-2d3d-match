@@ -15,7 +15,7 @@ from pydoc import locate
 
 import numpy as np
 import torch
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -296,6 +296,8 @@ def initialize_3d_and_freeze_2d(model, init_cp=None, freeze_2d=False, initial_3d
         print("2D weights are UNFROZEN.")
 def training(rank, conf, output_dir, args):
     if args.restore:
+        with open_dict(conf):
+            conf.model.is_restoring = True
         logger.info(f"Restoring from previous training of {args.experiment}")
         try:
             init_cp = get_last_checkpoint(args.experiment, allow_interrupted=False)
@@ -395,8 +397,8 @@ def training(rank, conf, output_dir, args):
         train_loader = dataset.get_overfit_loader("train")
         val_loader = val_dataset.get_overfit_loader("val")
     else:
-        train_loader = dataset.get_data_loader("train", distributed=args.distributed)
-        val_loader = val_dataset.get_data_loader("val")
+        train_loader = dataset.get_data_loader("train", distributed=args.distributed, pinned=True)
+        val_loader = val_dataset.get_data_loader("val", pinned=True)
     if rank == 0:
         logger.info(f"Training loader has {len(train_loader)} batches")
         logger.info(f"Validation loader has {len(val_loader)} batches")
@@ -411,20 +413,19 @@ def training(rank, conf, output_dir, args):
 
     stop = False
     signal.signal(signal.SIGINT, sigint_handler)
-    model = get_model(conf.model.name)(conf.model).to(device)
-
+    model = get_model(conf.model.name)(conf.model).to(device)   
     if init_cp is not None:
         model.load_state_dict(init_cp["model"], strict=False)
 
     raw_model = model.module if hasattr(model, "module") else model
     if "lightglu3d" in raw_model.__class__.__name__.lower():
-        init_cp = None
-        weights_path = conf.model.get("weights") 
-        if weights_path:
-            logger.info(f"Loading weights from {weights_path} for manual stitching...")
-            init_cp = torch.load(weights_path, map_location="cpu")
-            if "model" not in init_cp:
-                init_cp = {"model": init_cp}
+        if init_cp == None:
+            weights_path = conf.model.get("weights") 
+            if weights_path:
+                logger.info(f"Loading weights from {weights_path} for manual stitching...")
+                init_cp = torch.load(weights_path, map_location="cpu")
+                if "model" not in init_cp:
+                    init_cp = {"model": init_cp}
                 
         initialize_3d_and_freeze_2d(
             model,
@@ -488,7 +489,10 @@ def training(rank, conf, output_dir, args):
 
     lr_scheduler = get_lr_scheduler(optimizer=optimizer, conf=conf.train.lr_schedule)
     if args.restore:
-        optimizer.load_state_dict(init_cp["optimizer"])
+        try:
+            optimizer.load_state_dict(init_cp["optimizer"])
+        except ValueError as e:
+            print(f"Warning: Optimizer shape mismatch ({e}). Initializing fresh optimizer state.")
         if "lr_scheduler" in init_cp:
             lr_scheduler.load_state_dict(init_cp["lr_scheduler"])
 
