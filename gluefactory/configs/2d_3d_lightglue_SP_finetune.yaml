@@ -22,10 +22,10 @@ model:
 data:
   name: mega_2d3d_dataset
   root: "/proj/vlarsson/outputs"
-  split_train: "splits/train.txt"
-  split_val: "splits/val.txt"
-  split_test: "splits/test.txt"
-  batch_size: 16
+  split_train: "/home/x_lishu/matching/glue-factory/gluefactory/datasets/megadepth_scene_lists/train_scenes_clean_try.txt"
+  split_val: "/home/x_lishu/matching/glue-factory/gluefactory/datasets/megadepth_scene_lists/valid_scenes_clean_try.txt"
+  split_test: "/home/x_lishu/matching/glue-factory/gluefactory/datasets/megadepth_scene_lists/test_scenes_clean_try.txt"
+  batch_size: 8
   num_workers: 4
 
 train:

@@ -8,6 +8,7 @@ from torch.utils.data import Dataset
 from gluefactory.datasets.base_dataset import BaseDataset
 import torch
 import torch.nn.functional as F
+from scipy.spatial import cKDTree
 
 def load_scene_list(split_file):
     with open(split_file, "r") as f:
@@ -126,6 +127,26 @@ class Torch2D3D(Dataset):
             with open(covis_path, "rb") as f:
                 covis_dict = pickle.load(f)
 
+            feats_2d_cache = {}
+            if feats_2d_path.exists():
+                with h5py.File(feats_2d_path, "r") as f_h5:
+                    for img_name in f_h5.keys():
+                        feats_2d_cache[img_name] = {
+                            "keypoints": f_h5[img_name]["keypoints"][:],
+                            "descriptors": f_h5[img_name]["descriptors"][:],
+                            "scores": f_h5[img_name]["scores"][:]
+                        }
+            
+            feats_3d_cache = {}
+            if feats_3d_path.exists():
+                with h5py.File(feats_3d_path, "r") as f_h5:
+                    for pid in f_h5.keys():
+                        feats_3d_cache[pid] = {
+                            "keypoints": f_h5[pid]["keypoints"][:],
+                            "descriptors": f_h5[pid]["descriptors"][:],
+                            "scores": f_h5[pid]["scores"][:]
+                        }
+
             # store per-scene static data
             self.scene_data[scene] = {
                 "query_cams": query_cams,
@@ -146,11 +167,11 @@ class Torch2D3D(Dataset):
         while True:
             scene, query = self.samples[idx]
             scene_info = self.scene_data[scene]
-            # load 2D features
-            query_feats = self.load_query_features(query, scene_info["feats_2d_path"])
-            # load visible 3D points and the averaged features
+            # Load 2D features from cache
+            query_feats = self.load_query_features(query, scene_info["feats_2d_cache"])
+            # Load visible 3D points from cache
             visible_p3d = scene_info["covis"][query]["unique_points"]
-            p3d_feats = self.load_3d_features(visible_p3d, scene_info["feats_3d_path"])
+            p3d_feats = self.load_3d_features(visible_p3d, scene_info["feats_3d_cache"])
 
             if p3d_feats["keypoints"].shape[0] > 0:
                 # if the 3D set is not empty
@@ -289,36 +310,53 @@ class Torch2D3D(Dataset):
 
         projected = np.stack([u, v], axis=1)
 
-        # find the nearest 2D keypoint
-        for idx3d, proj_pt in zip(valid_indices, projected):
+        # # find the nearest 2D keypoint
+        # for idx3d, proj_pt in zip(valid_indices, projected):
 
-            dists = np.linalg.norm(kpts2d - proj_pt, axis=1)
-            min_idx = np.argmin(dists)
+        #     dists = np.linalg.norm(kpts2d - proj_pt, axis=1)
+        #     min_idx = np.argmin(dists)
 
-            if dists[min_idx] < reproj_thresh:
+        #     if dists[min_idx] < reproj_thresh:
 
-                if matches0[min_idx] == -1: # in case to rewrite, only register the first matched pair
-                    matches0[min_idx] = idx3d
-                    matches1[idx3d] = min_idx
+        #         if matches0[min_idx] == -1: # in case to rewrite, only register the first matched pair
+        #             matches0[min_idx] = idx3d
+        #             matches1[idx3d] = min_idx
+
+        # Change a faster way useing KDTree
+        if len(projected) > 0 and N2D > 0:
+            tree = cKDTree(kpts2d)
+        
+            # Query the tree for the nearest 2D keypoint to each projected 3D point
+            # distance_upper_bound acts as an instant cutoff mask (reproj_thresh)
+            dists, min_indices = tree.query(projected, distance_upper_bound=reproj_thresh)
+        
+            # Iterate over the valid results and assign matches
+            for idx3d, min_idx, dist in zip(valid_indices, min_indices, dists):
+                # cKDTree returns len(kpts2d) if no neighbor was found within the threshold
+                if min_idx < N2D: 
+                    if matches0[min_idx] == -1:
+                        matches0[min_idx] = idx3d
+                        matches1[idx3d] = min_idx
 
         return matches0, matches1
     
-    def load_3d_features(self, points3d, h5_path):
+    def load_3d_features(self, points3d, feats_3d_cache):
 
         point3d_feature_dict = {}
         descriptors =[]
         keypoints = []
         scores = []
-        with h5py.File(h5_path, "r") as f_h5:
-            for id in points3d:
-                id = str(id)
-                if id not in f_h5:
-                    print(f"WARNING: {id} not found in {h5_path}")
-                    continue
-                ds = f_h5[id]
-                descriptors.append(ds["descriptors"][:].reshape(1,256))
-                keypoints.append(ds["keypoints"][:].reshape(1,3))
-                scores.append(ds["scores"][:])
+
+        # From the preload feature cache to get the visible features
+        for pid in points3d:
+            pid_str = str(pid)
+            if pid_str not in feats_3d_cache:
+                continue
+            
+            ds = feats_3d_cache[pid_str]
+            descriptors.append(ds["descriptors"].reshape(1, 256))
+            keypoints.append(ds["keypoints"].reshape(1, 3))
+            scores.append(ds["scores"])
                 
         if len(descriptors) == 0:
             point3d_feature_dict["descriptors"] = np.zeros((0, 256), dtype=np.float32)
