@@ -3,15 +3,15 @@ experiment:
   seed: 0
 
 model:
-  name: lightglue
-  weights: "/home/x_jiagu/glue-factory/superpoint_lightglue.pth"
+  name: lightglue_adapt
+  weights: "/home/x_lishu/matching/colla_gluefactory/glue-factory-2d3d-match/superpoint_lightglue.pth" # "/home/x_jiagu/glue-factory/superpoint_lightglue.pth"
   input_dim: 256
   descriptor_dim: 256
   n_layers: 9
   num_heads: 4
   flash: True
   checkpointed: True
-  freeze_backbone: False
+  freeze_backbone: True
   mp: True
   filter_threshold: 0.1
   loss:
@@ -22,9 +22,9 @@ model:
 data:
   name: mega_2d3d_dataset
   root: "/proj/vlarsson/outputs"
-  split_train: "/home/x_lishu/matching/glue-factory/gluefactory/datasets/megadepth_scene_lists/train_scenes_clean_try.txt"
-  split_val: "/home/x_lishu/matching/glue-factory/gluefactory/datasets/megadepth_scene_lists/valid_scenes_clean_try.txt"
-  split_test: "/home/x_lishu/matching/glue-factory/gluefactory/datasets/megadepth_scene_lists/test_scenes_clean_try.txt"
+  split_train: "splits/train.txt"
+  split_val: "splits/val.txt"
+  split_test: "splits/test.txt"
   batch_size: 8
   num_workers: 4
 
@@ -32,7 +32,7 @@ train:
   seed: 0
   epochs: 20
   optimizer: adamw
-  lr: 1e-3 # 1e-4 for 3-10 epochs
+  lr: 1e-4 # 1e-3 # 1e-4 for 3-10 epochs
   lr_schedule:
     type: "MultiStepLR" 
     on_epoch: True     
