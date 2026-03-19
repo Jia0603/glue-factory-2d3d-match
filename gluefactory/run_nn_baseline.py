@@ -17,7 +17,7 @@ def run_nn_eval():
         "data": {
             "name": "mega_2d3d_dataset",
             "root": "/proj/vlarsson/outputs",
-            "split_val": "splits/val.txt", 
+            "split_val": "splits/val_72.txt", 
             "batch_size": 1,
             "num_workers": 4,
         }

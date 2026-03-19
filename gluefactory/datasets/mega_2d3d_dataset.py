@@ -385,7 +385,7 @@ class MegaDepth2D3D(BaseDataset):
         samples = []
         for scene in scenes:
             query_path = Path(self.root) / "query_sets" / scene
-            query_names_file = query_path / "query_image_names.txt"
+            query_names_file = query_path / "query_image_names_clean.txt"
             if not query_names_file.exists():
                 continue
             queries = load_query_names(query_names_file)

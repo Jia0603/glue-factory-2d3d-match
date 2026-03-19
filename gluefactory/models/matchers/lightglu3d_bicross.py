@@ -193,8 +193,8 @@ class CrossBlock(nn.Module):
         dim_head = embed_dim // num_heads
         self.scale = dim_head**-0.5
         inner_dim = dim_head * num_heads
-        self.to_q = nn.Linear(embed_dim, inner_dim, bias=bias)
-        self.to_k = nn.Linear(embed_dim, inner_dim, bias=bias)
+        self.to_qk2d = nn.Linear(embed_dim, inner_dim, bias=bias)
+        self.to_qk3d = nn.Linear(embed_dim, inner_dim, bias=bias)
         self.to_v = nn.Linear(embed_dim, inner_dim, bias=bias)
         self.to_out = nn.Linear(inner_dim, embed_dim, bias=bias)
         self.ffn = nn.Sequential(
@@ -212,45 +212,53 @@ class CrossBlock(nn.Module):
         return func(x0), func(x1)
 
     def forward(
-            self, x0: torch.Tensor, x1: torch.Tensor, k_mask: Optional[torch.Tensor] = None, q_mask: Optional[torch.Tensor] = None
+            self, x0: torch.Tensor, x1: torch.Tensor, mask0: Optional[torch.Tensor] = None, mask1: Optional[torch.Tensor] = None
             ) -> List[torch.Tensor]:
-        q = self.to_q(x0)
-        k = self.to_k(x1)
-        v = self.to_v(x1)
+        qk0 = self.to_qk2d(x0)
+        qk1 = self.to_qk3d(x1)
+        v0, v1 = self.map_(self.to_v, x0, x1)
         
-        q, k, v = map(
+        qk0, qk1, v0, v1 = map(
             lambda t: t.unflatten(-1, (self.heads, -1)).transpose(1, 2),
-            (q, k, v),
+            (qk0, qk1, v0, v1),
         )
-        if k_mask is not None: # k_mask -> (B,H,1,k_len)
-            if k_mask.dim() == 2:
-                k_mask = k_mask[:, None, None, :]
-            elif k_mask.dim() == 3:
-                k_mask = k_mask[:, None, :, :]
 
-        if self.flash is not None and q.device.type == "cuda":
-            m0 = self.flash(q, k, v, k_mask)
+        if mask0 is not None: # mask -> (B,H,1,seq_len)
+            if mask0.dim() == 2:
+                mask0 = mask0[:, None, None, :]
+            elif mask0.dim() == 3:
+                mask0 = mask0[:, None, :, :]
+        if mask1 is not None: # mask -> (B,H,1,seq_len)
+            if mask1.dim() == 2:
+                mask1 = mask1[:, None, None, :]
+            elif mask1.dim() == 3:
+                mask1 = mask1[:, None, :, :]
+
+        if self.flash is not None and x0.device.type == "cuda":
+            m0 = self.flash(qk0, qk1, v1, mask1)
+            m1 = self.flash(qk1, qk0, v0, mask0)
             
         else:               
-            q, k = q * self.scale**0.5, k * self.scale**0.5
-            sim = torch.einsum("bhid, bhjd -> bhij", q, k)
-            if k_mask is not None:
-                sim = sim.masked_fill(~k_mask, -float("inf"))
-            attn01 = F.softmax(sim, dim=-1)
-            m0 = torch.einsum("bhij, bhjd -> bhid", attn01, v)
-            if k_mask is not None:
-                m0 = m0.nan_to_num()
 
-        if q_mask is not None: # q_mask -> (B,H,q_len,1)
-            m0 = m0.masked_fill(~q_mask.view(q_mask.shape[0], 1, q_mask.shape[1], 1), 0.0)
-        m0 = m0.transpose(1, 2).flatten(start_dim=-2) # shape (B,q_len,d)
-        m0 = self.to_out(m0)
-        if q_mask is not None:
-            m0 = m0.masked_fill(~q_mask.unsqueeze(-1), 0.0)
+            qk0, qk1 = qk0 * self.scale**0.5, qk1 * self.scale**0.5
+            sim = torch.einsum("bhid, bhjd -> bhij", qk0, qk1)
+            if mask0 is not None and mask1 is not None:
+                sim0 = sim.masked_fill(~mask1, -float("inf"))
+                attn01 = F.softmax(sim0, dim=-1)
+                sim1 = sim.transpose(-2, -1).contiguous().masked_fill(~mask0, -float("inf"))
+                attn10 = F.softmax(sim1, dim=-1)
+            else:
+                attn01 = F.softmax(sim, dim=-1)
+                attn10 = F.softmax(sim.transpose(-2, -1).contiguous(), dim=-1)
+            m0 = torch.einsum("bhij, bhjd -> bhid", attn01, v1)
+            m1 = torch.einsum("bhji, bhjd -> bhid", attn10.transpose(-2, -1), v0)
+            if mask0 is not None and mask1 is not None:
+                m0, m1 = m0.nan_to_num(), m1.nan_to_num()
+        m0, m1 = self.map_(lambda t: t.transpose(1, 2).flatten(start_dim=-2), m0, m1)
+        m0, m1 = self.map_(self.to_out, m0, m1)
         x0 = x0 + self.ffn(torch.cat([x0, m0], -1))
-        if q_mask is not None:
-            x0 = x0.masked_fill(~q_mask.unsqueeze(-1), 0.0)
-        return x0
+        x1 = x1 + self.ffn(torch.cat([x1, m1], -1))
+        return x0, x1
 
 
 class TransformerLayer(nn.Module):
@@ -259,7 +267,6 @@ class TransformerLayer(nn.Module):
         self.self_attn = SelfBlock(*args, **kwargs)
         self.cross_attn = CrossBlock(*args, **kwargs)
         self.self_attn3d = SelfBlock(*args, **kwargs)
-        self.cross_attn3d = CrossBlock(*args, **kwargs)
 
     def forward(
         self,
@@ -275,7 +282,7 @@ class TransformerLayer(nn.Module):
         else:
             desc0 = self.self_attn(desc0, encoding0)
             desc1 = self.self_attn3d(desc1, encoding1)
-            return self.cross_attn(desc0, desc1), self.cross_attn3d(desc1, desc0)
+            return self.cross_attn(desc0, desc1)
 
     # This part is compiled and allows padding inputs
     def masked_forward(self, desc0, desc1, encoding0, encoding1, mask0, mask1):
@@ -283,7 +290,7 @@ class TransformerLayer(nn.Module):
         desc0 = self.self_attn(desc0, encoding0, mask0)
         desc1 = self.self_attn3d(desc1, encoding1, mask1)
 
-        return self.cross_attn(desc0, desc1, mask1, mask0), self.cross_attn3d(desc1, desc0, mask0, mask1)
+        return self.cross_attn(desc0, desc1, mask0, mask1)
 
 
 def sigmoid_log_double_softmax(
@@ -366,7 +373,7 @@ def filter_matches(scores: torch.Tensor, th: float):
 
 class LightGlu3D(nn.Module):
     default_conf = {
-        "name": "lightglu3d",  # just for interfacing
+        "name": "lightglu3d_bicross",  # just for interfacing
         "input_dim": 256,  # input descriptor dimension (autoselected from weights)
         "add_scale_ori": False,
         "descriptor_dim": 256,

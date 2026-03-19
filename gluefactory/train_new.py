@@ -232,12 +232,8 @@ def initialize_3d_and_freeze_2d(model, init_cp=None, freeze_2d=False, initial_3d
                 if qk_w_key in sd:
                     with torch.no_grad():
                         try:
-                            layer.cross_attn.to_q.weight.copy_(sd[qk_w_key])
-                            layer.cross_attn.to_q.bias.copy_(sd[qk_b_key])
-                            layer.cross_attn3d.to_k.weight.copy_(sd[qk_w_key])
-                            layer.cross_attn3d.to_k.bias.copy_(sd[qk_b_key])
-                            layer.cross_attn3d.to_v.weight.copy_(sd[v_w_key])
-                            layer.cross_attn3d.to_v.bias.copy_(sd[v_b_key])
+                            layer.cross_attn.to_qk2d.weight.copy_(sd[qk_w_key])
+                            layer.cross_attn.to_qk2d.bias.copy_(sd[qk_b_key])
                             if i == 0:
                                 print(f"Initialized 2D-source cross-attn weights.")
                         except Exception as e:
@@ -246,12 +242,8 @@ def initialize_3d_and_freeze_2d(model, init_cp=None, freeze_2d=False, initial_3d
                         if initial_3d_with_2d:
                             try:
                                 layer.self_attn3d.load_state_dict(layer.self_attn.state_dict())
-                                layer.cross_attn3d.to_q.weight.copy_(sd[qk_w_key])
-                                layer.cross_attn3d.to_q.bias.copy_(sd[qk_b_key])
-                                layer.cross_attn.to_k.weight.copy_(sd[qk_w_key])
-                                layer.cross_attn.to_k.bias.copy_(sd[qk_b_key])
-                                layer.cross_attn3d.to_out.load_state_dict(layer.cross_attn.to_out.state_dict())
-                                layer.cross_attn3d.ffn.load_state_dict(layer.cross_attn.ffn.state_dict())
+                                layer.cross_attn.to_qk3d.weight.copy_(sd[qk_w_key])
+                                layer.cross_attn.to_qk3d.bias.copy_(sd[qk_b_key])
                                 if i==0:
                                     print(f"Initialized 3D-source cross-attn weights with 2D weights.")
                             except Exception as e:
@@ -285,9 +277,7 @@ def initialize_3d_and_freeze_2d(model, init_cp=None, freeze_2d=False, initial_3d
     
     if freeze_2d:
         for name, param in m.named_parameters():
-            if any(x in name for x in ["self_attn.", "posenc."]) and "3d" not in name:
-                param.requires_grad = False
-            if any(x in name for x in ["cross_attn.to_q", "cross_attn3d.to_k", "cross_attn3d.to_v"]):
+            if any(x in name for x in ["self_attn.", "posenc.", "cross_attn.to_qk2d"]) and "3d" not in name:
                 param.requires_grad = False
         print("Frozen 2D-source projection layers, allowing 3D-source layers to adapt.")
     else:

@@ -1,9 +1,9 @@
 experiment:
-  name: lightglu3d
+  name: lightglu3d_bicross
   seed: 0
 
 model:
-  name: lightglu3d
+  name: lightglu3d_bicross
   weights: "/home/x_jiagu/glue-factory/superpoint_lightglue.pth"
   input_dim: 256
   descriptor_dim: 256
@@ -29,18 +29,17 @@ data:
 
 train:
   seed: 0
-  epochs: 30
+  epochs: 10
   optimizer: adamw
   lr: 1e-4 # 1e-4 for 3-10 epochs
-  lr_schedule:
-    type: "MultiStepLR" 
-    on_epoch: True     
-    options:
-      milestones: [9, 12, 18]
-      gamma: 0.5
+  # lr_schedule:
+  #   type: "exp" 
+  #   start: 20
+  #   on_epoch: True
+  #   exp_div_10: 10
   lr_scaling: [
-    [1.0, ["token_confidence."]], # freeze confidence classifier first
-    [0.1, ["self_attn.", "posenc.","cross_attn.to_q", "cross_attn3d.to_k", "cross_attn3d.to_v"]],
+    [0.0, ["token_confidence."]], # freeze confidence classifier first
+    [0.1, ["self_attn.", "posenc.","cross_attn.to_qk2d"]],
     [100, ["dampingnet.const"]]
     ]
   freeze_2d: False
