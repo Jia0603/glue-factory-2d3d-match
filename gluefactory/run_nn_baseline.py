@@ -16,13 +16,8 @@ def run_nn_eval():
         },
         "data": {
             "name": "mega_2d3d_dataset",
-<<<<<<< HEAD
             "root": "/proj/vlarsson/outputs",
-            "split_val": "splits/val_72.txt", 
-=======
-            "root": "/proj/vlarsson/users/x_lishu/colla_matching/outputs",
-            "split_test": "/home/x_lishu/matching/glue-factory/gluefactory/datasets/megadepth_scene_lists/test_scenes_clean.txt", 
->>>>>>> c4a09ca (nn grid)
+            "split_val": "splits/test.txt", 
             "batch_size": 1,
             "num_workers": 4,
         }
@@ -32,7 +27,7 @@ def run_nn_eval():
     print(f"Using device: {device}")
 
     dataset = get_dataset(conf["data"]["name"])(conf["data"])
-    loader = dataset.get_data_loader("val")
+    loader = dataset.get_data_loader("test")
 
     ModelClass = get_model(conf["model"]["name"])
     full_conf = OmegaConf.merge(ModelClass.default_conf, conf["model"])

@@ -9,7 +9,7 @@ def run_nn_grid_search():
     data_conf = {
         "name": "mega_2d3d_dataset",
         "root": "/proj/vlarsson/outputs",
-        "split_val": "/home/x_lishu/matching/glue-factory/gluefactory/datasets/megadepth_scene_lists/valid_scenes_clean.txt", 
+        "split_val": "splits/val.txt", 
         "batch_size": 1,
         "num_workers": 4,
     }

@@ -719,15 +719,23 @@ class LightGlue(nn.Module):
             gt_assignment = torch.zeros((batch_size, m, n), device=device)
             for b in range(batch_size):
                 m0 = data["gt_matches0"][b]
-                valid_mask = m0 != -1
+                # Only strict positive matches (>= 0) get placed in the matrix.
+                # -1 (Unmatchable) and -2 (Ignore) are excluded.
+                valid_mask = m0 >= 0
                 if valid_mask.any():
                     indices_2d = torch.where(valid_mask)[0]
                     indices_3d = m0[valid_mask].long()
                     gt_assignment[b, indices_2d, indices_3d] = 1.0
             data["gt_assignment"] = gt_assignment
 
+        # Instruct NLLLOSS to zero the gradient at point -2.
+        if "gt_weights0" not in data:
+            data["gt_weights0"] = (data["gt_matches0"] != -2).float()
+        if "gt_weights1" not in data:
+            data["gt_weights1"] = (data["gt_matches1"] != -2).float()
         mask0 = data.get("mask0", None)
         mask1 = data.get("mask1", None)
+        
         def loss_params(pred, i):
             la, _ = self.log_assignment[i](
                 pred["ref_descriptors0"][:, i], pred["ref_descriptors1"][:, i], mask0, mask1
@@ -772,10 +780,10 @@ class LightGlue(nn.Module):
             losses["total"] = losses["total"] + losses["confidence"]
 
         if not self.training:
-            # add metrics
             metrics = matcher_metrics(pred, data)
         else:
             metrics = {}
+            
         return losses, metrics
 
 
