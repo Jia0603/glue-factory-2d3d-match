@@ -21,10 +21,10 @@ model:
 data:
   name: mega_2d3d_dataset
   root: "/proj/vlarsson/outputs"
-  split_train: "splits/train_small.txt"
+  split_train: "splits/train.txt"
   split_val: "splits/val.txt"
   split_test: "splits/test.txt"
-  batch_size: 16
+  batch_size: 32
   num_workers: 16
 
 train:

@@ -196,6 +196,8 @@ class CrossBlock(nn.Module):
         self.to_qk2d = nn.Linear(embed_dim, inner_dim, bias=bias)
         self.to_qk3d = nn.Linear(embed_dim, inner_dim, bias=bias)
         self.to_v = nn.Linear(embed_dim, inner_dim, bias=bias)
+        # self.to_v2d = nn.Linear(embed_dim, inner_dim, bias=bias)
+        # self.to_v3d = nn.Linear(embed_dim, inner_dim, bias=bias)
         self.to_out = nn.Linear(inner_dim, embed_dim, bias=bias)
         self.ffn = nn.Sequential(
             nn.Linear(2 * embed_dim, 2 * embed_dim),
@@ -216,6 +218,8 @@ class CrossBlock(nn.Module):
             ) -> List[torch.Tensor]:
         qk0 = self.to_qk2d(x0)
         qk1 = self.to_qk3d(x1)
+        # v0 = self.to_v2d(x0)
+        # v1 = self.to_v3d(x1)
         v0, v1 = self.map_(self.to_v, x0, x1)
         
         qk0, qk1, v0, v1 = map(
@@ -433,6 +437,8 @@ class LightGlu3D(nn.Module):
             # weights can be either a path or an existing file from official LG
             if Path(conf.weights).exists():
                 state_dict = torch.load(conf.weights, map_location="cpu")
+                if "model" in state_dict:
+                    state_dict = state_dict["model"]
             elif (Path(DATA_PATH) / conf.weights).exists():
                 state_dict = torch.load(
                     str(DATA_PATH / conf.weights), map_location="cpu"
