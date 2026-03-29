@@ -4,11 +4,7 @@ experiment:
 
 model:
   name: lightglue_adapt
-  weights: "/home/x_lishu/matching/colla_gluefactory/glue-factory-2d3d-match/superpoint_lightglue.pth" # "/home/x_jiagu/glue-factory/superpoint_lightglue.pth"
-  input_dim: 256
-  descriptor_dim: 256
-  n_layers: 9
-  num_heads: 4
+  weights: "/home/x_lishu/matching/colla_gluefactory/glue-factory-2d3d-match/superpoint_lightglue.pth"
   flash: True
   checkpointed: True
   freeze_backbone: True
@@ -20,19 +16,19 @@ model:
     nll_balancing: 0.5
 
 data:
-  name: mega_2d3d_dataset
+  name: mega_2d3d_dataset_soft # mega_2d3d_dataset
   root: "/proj/vlarsson/outputs"
   split_train: "splits/train.txt"
   split_val: "splits/val.txt"
   split_test: "splits/test.txt"
   batch_size: 8
-  num_workers: 4
+  num_workers: 16
 
 train:
   seed: 0
   epochs: 20
   optimizer: adamw
-  lr: 1e-5 # 1e-3 # 1e-4 for 3-10 epochs
+  lr: 1e-5 
   lr_schedule:
     type: "MultiStepLR" 
     on_epoch: True     

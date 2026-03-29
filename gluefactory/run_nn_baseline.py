@@ -10,14 +10,14 @@ def run_nn_eval():
     conf = {
         "model": {
             "name": "matchers.nearest_neighbor_matcher",
-            "do_mutual_check": True,
-            "ratio_thresh": 0.9,
-            "distance_thresh": 5.0,
+            "mutual_check": True,
+            "ratio_thresh": None,
+            "distance_thresh": 0.75,
         },
         "data": {
             "name": "mega_2d3d_dataset",
             "root": "/proj/vlarsson/outputs",
-            "split_val": "splits/val_72.txt", 
+            "split_val": "splits/test.txt", 
             "batch_size": 1,
             "num_workers": 4,
         }
@@ -27,7 +27,7 @@ def run_nn_eval():
     print(f"Using device: {device}")
 
     dataset = get_dataset(conf["data"]["name"])(conf["data"])
-    loader = dataset.get_data_loader("val")
+    loader = dataset.get_data_loader("test")
 
     ModelClass = get_model(conf["model"]["name"])
     full_conf = OmegaConf.merge(ModelClass.default_conf, conf["model"])
@@ -66,7 +66,7 @@ def run_nn_eval():
         results["recall"].append(recall)
 
     print("\n" + "="*30)
-    print(f"NN Baseline Results (Ratio={conf['model']['ratio_thresh']}):")
+    print(f"NN Baseline Results:")
     print(f"Average Matches:   {np.mean(results['num_matches']):.2f}")
     print(f"Match Precision: {np.mean(results['precision']):.4f}")
     print(f"Match Recall:    {np.mean(results['recall']):.4f}")

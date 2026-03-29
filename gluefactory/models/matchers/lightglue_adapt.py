@@ -51,7 +51,7 @@ def normalize_3d_with_quantile(
     # scale = dist / 2.0 # Sclale each dimension independently, a method need to be test with
     scale = torch.clamp(scale, min=1e-6)
 
-    kpts_norm = (kpts - shift) / scale * (2 * quantile_value - 1)
+    kpts_norm = (kpts - shift) / scale
 
     return kpts_norm
 
@@ -128,7 +128,8 @@ class Attention(nn.Module):
         if mask is not None:
             if mask.dim() < 4:
                 mask = mask.view(mask.shape[0], 1, 1, -1)
-            assert mask.shape[-1] == k.shape[-2], f"Mask length {mask.shape[-1]} != Key length {k.shape[-2]}"
+        
+        assert mask.shape[-1] == k.shape[-2], f"Mask length {mask.shape[-1]} != Key length {k.shape[-2]}"
 
         if self.enable_flash and q.device.type == "cuda":
             # use torch 2.0 scaled_dot_product_attention with flash
@@ -193,11 +194,8 @@ class CrossBlock(nn.Module):
         dim_head = embed_dim // num_heads
         self.scale = dim_head**-0.5
         inner_dim = dim_head * num_heads
-        self.to_qk2d = nn.Linear(embed_dim, inner_dim, bias=bias)
-        self.to_qk3d = nn.Linear(embed_dim, inner_dim, bias=bias)
+        self.to_qk = nn.Linear(embed_dim, inner_dim, bias=bias)
         self.to_v = nn.Linear(embed_dim, inner_dim, bias=bias)
-        # self.to_v2d = nn.Linear(embed_dim, inner_dim, bias=bias)
-        # self.to_v3d = nn.Linear(embed_dim, inner_dim, bias=bias)
         self.to_out = nn.Linear(inner_dim, embed_dim, bias=bias)
         self.ffn = nn.Sequential(
             nn.Linear(2 * embed_dim, 2 * embed_dim),
@@ -214,49 +212,35 @@ class CrossBlock(nn.Module):
         return func(x0), func(x1)
 
     def forward(
-            self, x0: torch.Tensor, x1: torch.Tensor, mask0: Optional[torch.Tensor] = None, mask1: Optional[torch.Tensor] = None
-            ) -> List[torch.Tensor]:
-        qk0 = self.to_qk2d(x0)
-        qk1 = self.to_qk3d(x1)
-        # v0 = self.to_v2d(x0)
-        # v1 = self.to_v3d(x1)
+        self, x0: torch.Tensor, x1: torch.Tensor, mask0: Optional[torch.Tensor] = None, mask1: Optional[torch.Tensor] = None
+    ) -> List[torch.Tensor]:
+        qk0, qk1 = self.map_(self.to_qk, x0, x1)
         v0, v1 = self.map_(self.to_v, x0, x1)
-        
         qk0, qk1, v0, v1 = map(
             lambda t: t.unflatten(-1, (self.heads, -1)).transpose(1, 2),
             (qk0, qk1, v0, v1),
         )
-
-        if mask0 is not None: # mask -> (B,H,1,seq_len)
-            if mask0.dim() == 2:
-                mask0 = mask0[:, None, None, :]
-            elif mask0.dim() == 3:
-                mask0 = mask0[:, None, :, :]
-        if mask1 is not None: # mask -> (B,H,1,seq_len)
-            if mask1.dim() == 2:
-                mask1 = mask1[:, None, None, :]
-            elif mask1.dim() == 3:
-                mask1 = mask1[:, None, :, :]
-
-        if self.flash is not None and x0.device.type == "cuda":
+        if self.flash is not None and qk0.device.type == "cuda":
             m0 = self.flash(qk0, qk1, v1, mask1)
             m1 = self.flash(qk1, qk0, v0, mask0)
-            
-        else:               
-
+            # m1 = self.flash(
+            #     qk1, qk0, v0, mask.transpose(-1, -2) if mask is not None else None
+            # )
+        else:
+            batch_size = x0.shape[0]
+            mask = None
+            if mask0 is not None and mask1 is not None:
+                mask = mask0.view(batch_size, 1, -1, 1) & mask1.view(batch_size, 1, 1, -1)
+                
             qk0, qk1 = qk0 * self.scale**0.5, qk1 * self.scale**0.5
             sim = torch.einsum("bhid, bhjd -> bhij", qk0, qk1)
-            if mask0 is not None and mask1 is not None:
-                sim0 = sim.masked_fill(~mask1, -float("inf"))
-                attn01 = F.softmax(sim0, dim=-1)
-                sim1 = sim.transpose(-2, -1).contiguous().masked_fill(~mask0, -float("inf"))
-                attn10 = F.softmax(sim1, dim=-1)
-            else:
-                attn01 = F.softmax(sim, dim=-1)
-                attn10 = F.softmax(sim.transpose(-2, -1).contiguous(), dim=-1)
+            if mask is not None:
+                sim = sim.masked_fill(~mask, -float("inf"))
+            attn01 = F.softmax(sim, dim=-1)
+            attn10 = F.softmax(sim.transpose(-2, -1).contiguous(), dim=-1)
             m0 = torch.einsum("bhij, bhjd -> bhid", attn01, v1)
             m1 = torch.einsum("bhji, bhjd -> bhid", attn10.transpose(-2, -1), v0)
-            if mask0 is not None and mask1 is not None:
+            if mask is not None:
                 m0, m1 = m0.nan_to_num(), m1.nan_to_num()
         m0, m1 = self.map_(lambda t: t.transpose(1, 2).flatten(start_dim=-2), m0, m1)
         m0, m1 = self.map_(self.to_out, m0, m1)
@@ -270,7 +254,6 @@ class TransformerLayer(nn.Module):
         super().__init__()
         self.self_attn = SelfBlock(*args, **kwargs)
         self.cross_attn = CrossBlock(*args, **kwargs)
-        self.self_attn3d = SelfBlock(*args, **kwargs)
 
     def forward(
         self,
@@ -285,15 +268,17 @@ class TransformerLayer(nn.Module):
             return self.masked_forward(desc0, desc1, encoding0, encoding1, mask0, mask1)
         else:
             desc0 = self.self_attn(desc0, encoding0)
-            desc1 = self.self_attn3d(desc1, encoding1)
+            desc1 = self.self_attn(desc1, encoding1)
             return self.cross_attn(desc0, desc1)
 
     # This part is compiled and allows padding inputs
     def masked_forward(self, desc0, desc1, encoding0, encoding1, mask0, mask1):
-        
+        # mask = mask0 & mask1.transpose(-1, -2)
+        # mask0 = mask0 & mask0.transpose(-1, -2)
+        # mask1 = mask1 & mask1.transpose(-1, -2)
         desc0 = self.self_attn(desc0, encoding0, mask0)
-        desc1 = self.self_attn3d(desc1, encoding1, mask1)
-
+        desc1 = self.self_attn(desc1, encoding1, mask1)
+        # return self.cross_attn(desc0, desc1, mask)
         return self.cross_attn(desc0, desc1, mask0, mask1)
 
 
@@ -375,9 +360,9 @@ def filter_matches(scores: torch.Tensor, th: float):
     return m0, m1, mscores0, mscores1
 
 
-class LightGlu3D(nn.Module):
+class LightGlue(nn.Module):
     default_conf = {
-        "name": "lightglu3d_bicross",  # just for interfacing
+        "name": "lightglue",  # just for interfacing
         "input_dim": 256,  # input descriptor dimension (autoselected from weights)
         "add_scale_ori": False,
         "descriptor_dim": 256,
@@ -420,6 +405,14 @@ class LightGlu3D(nn.Module):
 
         h, n, d = conf.num_heads, conf.n_layers, conf.descriptor_dim
 
+        # Define the Adapter for 3D features
+        self.adapter_3d = nn.Sequential(
+            nn.Linear(conf.descriptor_dim, conf.descriptor_dim * 2),
+            nn.GELU(),
+            nn.Linear(conf.descriptor_dim * 2, conf.descriptor_dim),
+            nn.LayerNorm(conf.descriptor_dim)
+        )
+
         self.transformers = nn.ModuleList(
             [TransformerLayer(d, h, conf.flash) for _ in range(n)]
         )
@@ -432,13 +425,10 @@ class LightGlu3D(nn.Module):
         self.loss_fn = NLLLoss(conf.loss)
 
         state_dict = None
-        is_restoring = conf.get("is_restoring", False)
-        if conf.weights is not None and not is_restoring:
+        if conf.weights is not None:
             # weights can be either a path or an existing file from official LG
             if Path(conf.weights).exists():
                 state_dict = torch.load(conf.weights, map_location="cpu")
-                if "model" in state_dict:
-                    state_dict = state_dict["model"]
             elif (Path(DATA_PATH) / conf.weights).exists():
                 state_dict = torch.load(
                     str(DATA_PATH / conf.weights), map_location="cpu"
@@ -474,6 +464,51 @@ class LightGlu3D(nn.Module):
                 [self.confidence_threshold(i) for i in range(self.conf.n_layers)]
             ),
         )
+        
+
+        # for _, param in self.named_parameters():
+        #         param.requires_grad = True
+
+        # if self.conf.get("freeze_backbone", False):
+        #     unfreeze_keywords = ["posenc3d", "transformers.7", "transformers.8"]
+        #     print(f"[*] Manual Log: Freeze Backbone, except for: {unfreeze_keywords}")
+
+        #     for name, param in self.named_parameters():
+    
+        #         if not any(key in name for key in unfreeze_keywords):
+        #             param.register_hook(lambda grad: torch.zeros_like(grad))
+
+        # #     for name, param in self.named_parameters():
+        # #         if any(key in name for key in unfreeze_keywords):
+        # #             param.requires_grad = True
+        # #             # print(f"[*] Manual Log: Unfrozen parameter: {name}") # only for debugging
+        # #         else:
+        # #             param.requires_grad = False
+        # else:
+        #     print("[*] Manual Log: Unfreeze mode. Training everything.")
+        # #     for _, param in self.named_parameters():
+        # #         param.requires_grad = True
+
+        # Freeze weights except the newly added adapter and 3d positional encoding
+        if self.conf.get("freeze_backbone", True):
+            # unfreeze_keywords = ["adapter_3d", "posenc3d"]
+            unfreeze_keywords = [
+                "adapter_3d", "posenc3d", 
+                "transformers.7", "transformers.8", 
+                "log_assignment.7", "log_assignment.8"
+            ]
+
+            print(f"[*] Manual Log: Freezing Backbone. Only training: {unfreeze_keywords}")
+
+            for name, param in self.named_parameters():
+                if any(key in name for key in unfreeze_keywords):
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+        else:
+            print("[*] Manual Log: Unfreeze mode. Training everything.")
+            for name, param in self.named_parameters():
+                param.requires_grad = True
 
     def compile(self, mode="reduce-overhead"):
         if self.conf.width_confidence != -1:
@@ -505,7 +540,11 @@ class LightGlu3D(nn.Module):
             size0 = kpts0.max(dim=1).values - kpts0.min(dim=1).values
             size0 = torch.clamp(size0, min=1e-6)
 
+            size1_3d = kpts1.max(dim=1).values - kpts1.min(dim=1).values
+            size1_3d = torch.clamp(size1_3d, min=1e-6)
+            size1 = size1_3d
         kpts0 = normalize_keypoints(kpts0, size0).clone()
+        # kpts1 = normalize_keypoints(kpts1, size1).clone()
         kpts1 = normalize_3d_with_quantile(kpts1, quantile_value=0.975).clone()
 
         if self.conf.add_scale_ori:
@@ -538,8 +577,12 @@ class LightGlu3D(nn.Module):
             desc1 = desc1.half()
         desc0 = self.input_proj(desc0)
         desc1 = self.input_proj(desc1)
+
+        desc1 = desc1 + self.adapter_3d(desc1) # Residual connection helps stability
+
         # cache positional embeddings
         encoding0 = self.posenc(kpts0)
+        # encoding1 = self.posenc(kpts1)
         encoding1 = self.posenc3d(kpts1) # 3d positional encoding
 
         # GNN + final_proj + assignment
@@ -577,9 +620,8 @@ class LightGlu3D(nn.Module):
             # only for eval
             if do_early_stop:
                 assert b == 1
-                actual_m, actual_n = int(mask0.sum()), int(mask1.sum())
                 token0, token1 = self.token_confidence[i](desc0, desc1)
-                if self.check_if_stop(token0[..., :actual_m, :], token1[..., :actual_n, :], i, actual_m + actual_n):
+                if self.check_if_stop(token0[..., :m, :], token1[..., :n, :], i, m + n):
                     break
             if do_point_pruning:
                 assert b == 1
@@ -602,7 +644,7 @@ class LightGlu3D(nn.Module):
                 encoding1 = encoding1.index_select(-2, keep1)
                 prune1[:, ind1] += 1
 
-        # desc0, desc1 = desc0[..., :m, :], desc1[..., :n, :] # original lightglue use this to drop the paddings, we use mask instead
+        desc0, desc1 = desc0[..., :m, :], desc1[..., :n, :]
         scores, _ = self.log_assignment[i](desc0, desc1, mask0, mask1)
         m0, m1, mscores0, mscores1 = filter_matches(scores, self.conf.filter_threshold)
 
@@ -677,15 +719,23 @@ class LightGlu3D(nn.Module):
             gt_assignment = torch.zeros((batch_size, m, n), device=device)
             for b in range(batch_size):
                 m0 = data["gt_matches0"][b]
-                valid_mask = m0 != -1
+                # Only strict positive matches (>= 0) get placed in the matrix.
+                # -1 (Unmatchable) and -2 (Ignore) are excluded.
+                valid_mask = m0 >= 0
                 if valid_mask.any():
                     indices_2d = torch.where(valid_mask)[0]
                     indices_3d = m0[valid_mask].long()
                     gt_assignment[b, indices_2d, indices_3d] = 1.0
             data["gt_assignment"] = gt_assignment
 
+        # Instruct NLLLOSS to zero the gradient at point -2.
+        if "gt_weights0" not in data:
+            data["gt_weights0"] = (data["gt_matches0"] != -2).float()
+        if "gt_weights1" not in data:
+            data["gt_weights1"] = (data["gt_matches1"] != -2).float()
         mask0 = data.get("mask0", None)
         mask1 = data.get("mask1", None)
+        
         def loss_params(pred, i):
             la, _ = self.log_assignment[i](
                 pred["ref_descriptors0"][:, i], pred["ref_descriptors1"][:, i], mask0, mask1
@@ -730,11 +780,11 @@ class LightGlu3D(nn.Module):
             losses["total"] = losses["total"] + losses["confidence"]
 
         if not self.training:
-            # add metrics
             metrics = matcher_metrics(pred, data)
         else:
             metrics = {}
+            
         return losses, metrics
 
 
-__main_model__ = LightGlu3D
+__main_model__ = LightGlue

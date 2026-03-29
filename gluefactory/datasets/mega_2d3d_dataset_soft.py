@@ -99,14 +99,21 @@ class Torch2D3D(Dataset):
     """
     2D-3D dataset for LightGlue training.
     Each sample = one query image and its visible 3D points.
+    Change in soft threshold version.
     """
 
-    def __init__(self, samples, root, reproj_thresh=3.0, depth_rel_thresh=0.1, max_2d=2048, max_3d=8192):
+    def __init__(self, samples, root, pos_reproj_thresh=3.0, neg_reproj_thresh=5.0, 
+                 pos_depth_thresh=0.1, neg_depth_thresh=0.25, max_2d=2048, max_3d=8192):
 
         self.samples = samples
         self.root = Path(root)
-        self.reproj_thresh = reproj_thresh
-        self.depth_rel_thresh = depth_rel_thresh
+        
+        # New Soft Thresholds
+        self.pos_reproj_thresh = pos_reproj_thresh
+        self.neg_reproj_thresh = neg_reproj_thresh
+        self.pos_depth_thresh = pos_depth_thresh
+        self.neg_depth_thresh = neg_depth_thresh
+        
         self.max_3d = max_3d
         self.max_2d = max_2d
 
@@ -158,17 +165,23 @@ class Torch2D3D(Dataset):
             idx = random.randint(0, len(self) - 1)
 
         camera = scene_info["query_cams"][query]
-        depth_map = load_depth(scene_info["depth_path"] / f"{Path(query).stem}.h5")
+        depth_file = scene_info["depth_path"] / f"{Path(query).stem}.h5"
+        depth_map = load_depth(depth_file) if depth_file.exists() else None
+        
+        # Call the new vectorized soft threshold function
         matches0, matches1 = self.compute_ground_truth_matches(
-            query_feats, p3d_feats, camera, depth_map, self.reproj_thresh, self.depth_rel_thresh,
+            query_feats, p3d_feats, camera, depth_map
         )
+        
         width = camera['intrinsics']['width']
         height = camera['intrinsics']['height']
         size0 = torch.tensor([width, height]).float()
         size1 = torch.tensor([1.0, 1.0, 1.0]).float()
+        
         kpts3d = torch.from_numpy(p3d_feats["keypoints"]).float()
         desc3d = torch.from_numpy(p3d_feats["descriptors"]).float()
         matches1 = torch.from_numpy(matches1).long()
+        
         kpts2d = torch.from_numpy(query_feats["keypoints"]).float()
         desc2d = torch.from_numpy(query_feats["descriptors"].T).float()
         matches0 = torch.from_numpy(matches0).long()
@@ -220,88 +233,115 @@ class Torch2D3D(Dataset):
         matches_pad[:N] = matches
 
         return kpts_pad, desc_pad, mask, matches_pad
-    def compute_ground_truth_matches(
-            self, query_feats, p3d_feats, camera, depth_map=None, reproj_thresh=3.0, depth_rel_thresh=0.1
-            ):
+    
+    def compute_ground_truth_matches(self, query_feats, p3d_feats, camera, depth_map=None):
         """
-        return:
-            matches0: (N2D,)
-            matches1: (N3D,)
+        Vectorized PyTorch implementation of GT matching with Soft Thresholds.
         """
 
-        kpts2d = query_feats["keypoints"]      # (N2D, 2)
-        pts3d = p3d_feats["keypoints"]       # (N3D, 3)
+        IGNORE_FEATURE = -2
+        UNMATCHED_FEATURE = -1
 
-        N2D = kpts2d.shape[0]
-        N3D = pts3d.shape[0]
+        kpts2d = torch.from_numpy(query_feats["keypoints"]).float() # (N2D, 2)
+        pts3d = torch.from_numpy(p3d_feats["keypoints"]).float()    # (N3D, 3)
 
-        matches0 = -np.ones(N2D, dtype=int)
-        matches1 = -np.ones(N3D, dtype=int)
+        N2D, N3D = kpts2d.shape[0], pts3d.shape[0]
 
-        # pose
-        R = qvec2rotmat(camera["qvec"])
-        t = np.array(camera["tvec"]).reshape(3, 1)
+        # Initialize with -1
+        matches0 = torch.full((N2D,), UNMATCHED_FEATURE, dtype=torch.long)
+        matches1 = torch.full((N3D,), UNMATCHED_FEATURE, dtype=torch.long)
 
-        # intrinsics
-        fx, fy, cx, cy = camera["intrinsics"]["params"][:4]# assuming PINHOLE: fx fy cx cy
-        width = camera["intrinsics"]["width"]
-        height = camera["intrinsics"]["height"]
+        if N3D == 0:
+            return matches0.numpy(), matches1.numpy()
 
-        # project all 3D points
-        X = pts3d.T  # (3, N3D)
-        X_cam = R @ X + t  # (3, N3D)
+        # Pose and intrinsics
+        R = torch.from_numpy(qvec2rotmat(camera["qvec"])).float()
+        t = torch.tensor(camera["tvec"]).float().view(3, 1)
 
-        z = X_cam[2]
-        valid = z > 0 # check depth > 0
+        fx, fy, cx, cy = camera["intrinsics"]["params"][:4]
+        width, height = camera["intrinsics"]["width"], camera["intrinsics"]["height"]
 
-        X_cam = X_cam[:, valid]
-        z = z[valid]
+        # Vectorized 3D projection
+        X = pts3d.T # (3, N3D)
+        X_cam = R @ X + t # (3, N3D)
+        
+        z = X_cam[2, :]
+        valid_z = z > 0
+        
+        # Avoid division by zero for invalid z
+        z_safe = torch.where(valid_z, z, torch.ones_like(z))
+        
+        u = fx * (X_cam[0, :] / z_safe) + cx
+        v = fy * (X_cam[1, :] / z_safe) + cy
 
-        u = fx * (X_cam[0] / z) + cx
-        v = fy * (X_cam[1] / z) + cy
+        valid_proj = valid_z & (u >= 0) & (u < width) & (v >= 0) & (v < height)
 
-        valid_proj = ((u >= 0) & (u < width) & (v >= 0) & (v < height))
+        # Depth check arrays
+        has_valid_depth = torch.zeros(N3D, dtype=torch.bool)
+        rel_error = torch.full((N3D,), float('inf'))
 
-        u = u[valid_proj]
-        v = v[valid_proj]    
-        z = z[valid_proj]
-
-        valid_indices = np.where(valid)[0][valid_proj]
-
-        # check depth consistency
         if depth_map is not None:
+            # Only sample depth for points that landed inside the image bounds
+            u_np, v_np = u[valid_proj].numpy(), v[valid_proj].numpy()
+            
+            if len(u_np) > 0:
+                depth_real = sample_depth_bilinear(depth_map, u_np, v_np)
+                depth_real_t = torch.from_numpy(depth_real).float()
+                
+                valid_d = depth_real_t > 0
+                
+                z_valid = z[valid_proj]
+                rel_err_valid = torch.full_like(depth_real_t, float('inf'))
+                rel_err_valid[valid_d] = torch.abs(z_valid[valid_d] - depth_real_t[valid_d]) / depth_real_t[valid_d]
+                
+                # Scatter back to the original N3D sized arrays
+                rel_error[valid_proj] = rel_err_valid
+                has_valid_depth[valid_proj] = valid_d
 
-            depth_real = sample_depth_bilinear(depth_map, u, v)
+        # Combine u,v into (N3D, 2)
+        projected = torch.stack([u, v], dim=1)
+        
+        # Vectorized Distance Matrix Calculation
+        dist_matrix = torch.cdist(projected.unsqueeze(0), kpts2d.unsqueeze(0)).squeeze(0) # -> (N3D, N2D)
+        
+        # Mask out points that projected behind the camera or off-screen
+        dist_matrix[~valid_proj] = float('inf')
 
-            valid_depth = depth_real > 0
-            rel_error = np.full_like(depth_real, np.inf)
-            rel_error[valid_depth] = (
-                np.abs(z[valid_depth] - depth_real[valid_depth])
-                / depth_real[valid_depth]
-            ).flatten()
+        # Get minimum distance to a 2D point for every 3D point
+        min_dists, min_indices = torch.min(dist_matrix, dim=1) # (N3D,)
 
-            depth_mask = (rel_error <= depth_rel_thresh)
+        # Filter only points that passed the loose negative threshold
+        valid_mask = min_dists <= self.neg_reproj_thresh
+        valid_3d_indices = torch.where(valid_mask)[0]
+        
+        # Loop over only the valid subset to prevent assignment collisions
+        for idx3d in valid_3d_indices:
+            min_idx_2d = min_indices[idx3d]
+            dist = min_dists[idx3d]
+            r_err = rel_error[idx3d]
+            valid_d = has_valid_depth[idx3d]
 
-            u = u[depth_mask]
-            v = v[depth_mask]
-            z = z[depth_mask]
-            valid_indices = valid_indices[depth_mask]
+            if valid_d:
+                # STRICT MATCH
+                if dist <= self.pos_reproj_thresh and r_err <= self.pos_depth_thresh:
+                    if matches0[min_idx_2d] in [UNMATCHED_FEATURE, IGNORE_FEATURE]:
+                        matches0[min_idx_2d] = idx3d
+                        matches1[idx3d] = min_idx_2d
+                # IGNORE MATCH
+                elif dist <= self.neg_reproj_thresh and r_err <= self.neg_depth_thresh:
+                    if matches0[min_idx_2d] == UNMATCHED_FEATURE:
+                        matches0[min_idx_2d] = IGNORE_FEATURE
+                    if matches1[idx3d] == UNMATCHED_FEATURE:
+                        matches1[idx3d] = IGNORE_FEATURE
+            else:
+                # MISSING DEPTH -> IGNORE MATCH
+                if dist <= self.neg_reproj_thresh:
+                    if matches0[min_idx_2d] == UNMATCHED_FEATURE:
+                        matches0[min_idx_2d] = IGNORE_FEATURE
+                    if matches1[idx3d] == UNMATCHED_FEATURE:
+                        matches1[idx3d] = IGNORE_FEATURE
 
-        projected = np.stack([u, v], axis=1)
-
-        # find the nearest 2D keypoint
-        for idx3d, proj_pt in zip(valid_indices, projected):
-
-            dists = np.linalg.norm(kpts2d - proj_pt, axis=1)
-            min_idx = np.argmin(dists)
-
-            if dists[min_idx] < reproj_thresh:
-
-                if matches0[min_idx] == -1: # in case to rewrite, only register the first matched pair
-                    matches0[min_idx] = idx3d
-                    matches1[idx3d] = min_idx
-
-        return matches0, matches1
+        return matches0.numpy(), matches1.numpy()
     
     def load_3d_features(self, points3d, h5_path):
 
@@ -360,8 +400,11 @@ class MegaDepth2D3D(BaseDataset):
 
     default_conf = {
         "batch_size": 1,
-        "reproj_thresh": 3.0,
-        "depth_rel_thresh": 0.1,
+        # Updated to dual thresholds
+        "pos_reproj_thresh": 3.0,
+        "neg_reproj_thresh": 5.0,
+        "pos_depth_thresh": 0.10,
+        "neg_depth_thresh": 0.25,
         "root": "/proj/vlarsson/outputs",
         "split_train": "splits/train.txt",
         "split_val": "splits/val.txt",
@@ -373,8 +416,11 @@ class MegaDepth2D3D(BaseDataset):
 
     def _init(self, conf):
         self.root = conf.root
-        self.reproj_thresh = conf.reproj_thresh
-        self.depth_rel_thresh = conf.depth_rel_thresh
+        self.pos_reproj_thresh = conf.pos_reproj_thresh
+        self.neg_reproj_thresh = conf.neg_reproj_thresh
+        self.pos_depth_thresh = conf.pos_depth_thresh
+        self.neg_depth_thresh = conf.neg_depth_thresh
+        
         # Build torch datasets
         self.train_dataset = self._build_dataset(conf.split_train)
         self.val_dataset = self._build_dataset(conf.split_val)
@@ -391,7 +437,14 @@ class MegaDepth2D3D(BaseDataset):
             queries = load_query_names(query_names_file)
             for q in queries:
                 samples.append((scene, q))
-        return Torch2D3D(samples, self.root, self.reproj_thresh, self.depth_rel_thresh)
+                
+        return Torch2D3D(
+            samples, self.root, 
+            pos_reproj_thresh=self.pos_reproj_thresh, 
+            neg_reproj_thresh=self.neg_reproj_thresh,
+            pos_depth_thresh=self.pos_depth_thresh,
+            neg_depth_thresh=self.neg_depth_thresh
+        )
     
     def get_dataset(self, split):
         if split == "train":
@@ -402,6 +455,3 @@ class MegaDepth2D3D(BaseDataset):
             return self.test_dataset
         else:
             raise ValueError(f"Unknown split {split}")
-        
-
-

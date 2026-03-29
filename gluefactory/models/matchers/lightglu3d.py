@@ -128,7 +128,7 @@ class Attention(nn.Module):
         if mask is not None:
             if mask.dim() < 4:
                 mask = mask.view(mask.shape[0], 1, 1, -1)
-        assert mask.shape[-1] == k.shape[-2], f"Mask length {mask.shape[-1]} != Key length {k.shape[-2]}"
+            assert mask.shape[-1] == k.shape[-2], f"Mask length {mask.shape[-1]} != Key length {k.shape[-2]}"
 
         if self.enable_flash and q.device.type == "cuda":
             # use torch 2.0 scaled_dot_product_attention with flash
