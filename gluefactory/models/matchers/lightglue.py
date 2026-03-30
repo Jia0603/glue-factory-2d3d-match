@@ -38,22 +38,6 @@ def normalize_keypoints(
     kpts = (kpts - shift[..., None, :]) / scale[..., None, None]
     return kpts
 
-@AMP_CUSTOM_FWD_F32
-def normalize_3d_with_quantile(
-    kpts: torch.Tensor, quantile_value:float=0.975
-) -> torch.Tensor:
-    upper_bound = torch.quantile(kpts, quantile_value, dim=-2, keepdim=True)
-    lower_bound = torch.quantile(kpts, 1 - quantile_value, dim=-2, keepdim=True)
-    
-    shift = (upper_bound + lower_bound) / 2
-    dist = (upper_bound - lower_bound)
-    scale = dist.max(dim=-1, keepdim=True).values / 2.0
-    # scale = dist / 2.0 # Sclale each dimension independently, a method need to be test with
-    scale = torch.clamp(scale, min=1e-6)
-
-    kpts_norm = (kpts - shift) / scale
-
-    return kpts_norm
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     x = x.unflatten(-1, (-1, 2))
@@ -125,12 +109,6 @@ class Attention(nn.Module):
             torch.backends.cuda.enable_flash_sdp(allow_flash)
 
     def forward(self, q, k, v, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if mask is not None:
-            if mask.dim() < 4:
-                mask = mask.view(mask.shape[0], 1, 1, -1)
-        
-        assert mask.shape[-1] == k.shape[-2], f"Mask length {mask.shape[-1]} != Key length {k.shape[-2]}"
-
         if self.enable_flash and q.device.type == "cuda":
             # use torch 2.0 scaled_dot_product_attention with flash
             if FLASH_AVAILABLE:
@@ -212,7 +190,7 @@ class CrossBlock(nn.Module):
         return func(x0), func(x1)
 
     def forward(
-        self, x0: torch.Tensor, x1: torch.Tensor, mask0: Optional[torch.Tensor] = None, mask1: Optional[torch.Tensor] = None
+        self, x0: torch.Tensor, x1: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> List[torch.Tensor]:
         qk0, qk1 = self.map_(self.to_qk, x0, x1)
         v0, v1 = self.map_(self.to_v, x0, x1)
@@ -221,17 +199,11 @@ class CrossBlock(nn.Module):
             (qk0, qk1, v0, v1),
         )
         if self.flash is not None and qk0.device.type == "cuda":
-            m0 = self.flash(qk0, qk1, v1, mask1)
-            m1 = self.flash(qk1, qk0, v0, mask0)
-            # m1 = self.flash(
-            #     qk1, qk0, v0, mask.transpose(-1, -2) if mask is not None else None
-            # )
+            m0 = self.flash(qk0, qk1, v1, mask)
+            m1 = self.flash(
+                qk1, qk0, v0, mask.transpose(-1, -2) if mask is not None else None
+            )
         else:
-            batch_size = x0.shape[0]
-            mask = None
-            if mask0 is not None and mask1 is not None:
-                mask = mask0.view(batch_size, 1, -1, 1) & mask1.view(batch_size, 1, 1, -1)
-                
             qk0, qk1 = qk0 * self.scale**0.5, qk1 * self.scale**0.5
             sim = torch.einsum("bhid, bhjd -> bhij", qk0, qk1)
             if mask is not None:
@@ -273,29 +245,19 @@ class TransformerLayer(nn.Module):
 
     # This part is compiled and allows padding inputs
     def masked_forward(self, desc0, desc1, encoding0, encoding1, mask0, mask1):
-        # mask = mask0 & mask1.transpose(-1, -2)
-        # mask0 = mask0 & mask0.transpose(-1, -2)
-        # mask1 = mask1 & mask1.transpose(-1, -2)
+        mask = mask0 & mask1.transpose(-1, -2)
+        mask0 = mask0 & mask0.transpose(-1, -2)
+        mask1 = mask1 & mask1.transpose(-1, -2)
         desc0 = self.self_attn(desc0, encoding0, mask0)
         desc1 = self.self_attn(desc1, encoding1, mask1)
-        # return self.cross_attn(desc0, desc1, mask)
-        return self.cross_attn(desc0, desc1, mask0, mask1)
+        return self.cross_attn(desc0, desc1, mask)
 
 
 def sigmoid_log_double_softmax(
-    sim: torch.Tensor, 
-    z0: torch.Tensor, 
-    z1: torch.Tensor, 
-    mask0: Optional[torch.Tensor] = None, 
-    mask1: Optional[torch.Tensor] = None
+    sim: torch.Tensor, z0: torch.Tensor, z1: torch.Tensor
 ) -> torch.Tensor:
     """create the log assignment matrix from logits and similarity"""
     b, m, n = sim.shape
-    if mask0 is not None and mask1 is not None:
-        mask_2d = mask0.view(b, m, 1) & mask1.view(b, 1, n)
-        sim = sim.masked_fill(~mask_2d, -1e9) 
-        z0 = z0.masked_fill(~mask0.view(b, m, 1), -1e9)
-        z1 = z1.masked_fill(~mask1.view(b, n, 1), -1e9)
     certainties = F.logsigmoid(z0) + F.logsigmoid(z1).transpose(1, 2)
     scores0 = F.log_softmax(sim, 2)
     scores1 = F.log_softmax(sim.transpose(-1, -2).contiguous(), 2).transpose(-1, -2)
@@ -313,12 +275,7 @@ class MatchAssignment(nn.Module):
         self.matchability = nn.Linear(dim, 1, bias=True)
         self.final_proj = nn.Linear(dim, dim, bias=True)
 
-    def forward(
-            self, desc0: torch.Tensor, 
-            desc1: torch.Tensor, 
-            mask0: Optional[torch.Tensor] = None, 
-            mask1: Optional[torch.Tensor] = None
-            ):
+    def forward(self, desc0: torch.Tensor, desc1: torch.Tensor):
         """build assignment matrix from descriptors"""
         mdesc0, mdesc1 = self.final_proj(desc0), self.final_proj(desc1)
         _, _, d = mdesc0.shape
@@ -326,15 +283,7 @@ class MatchAssignment(nn.Module):
         sim = torch.einsum("bmd,bnd->bmn", mdesc0, mdesc1)
         z0 = self.matchability(desc0)
         z1 = self.matchability(desc1)
-        if mask0 is not None and mask1 is not None:
-            m0 = mask0.view(mask0.shape[0], -1, 1)
-            m1 = mask1.view(mask1.shape[0], -1, 1)
-            mask_2d = m0 & m1.transpose(-1, -2)
-            # invalid positions -> -inf
-            sim = sim.masked_fill(~mask_2d, -1e9)
-            z0 = z0.masked_fill(~m0, -1e9)
-            z1 = z1.masked_fill(~m1, -1e9)
-        scores = sigmoid_log_double_softmax(sim, z0, z1, mask0, mask1)
+        scores = sigmoid_log_double_softmax(sim, z0, z1)
         return scores, sim
 
     def get_matchability(self, desc: torch.Tensor):
@@ -399,9 +348,6 @@ class LightGlue(nn.Module):
         self.posenc = LearnableFourierPositionalEncoding(
             2 + 2 * conf.add_scale_ori, head_dim, head_dim
         )
-        self.posenc3d = LearnableFourierPositionalEncoding(
-            3 + 2 * conf.add_scale_ori, head_dim, head_dim
-        )
 
         h, n, d = conf.num_heads, conf.n_layers, conf.descriptor_dim
 
@@ -442,13 +388,7 @@ class LightGlue(nn.Module):
                 state_dict = {k.replace(*pattern): v for k, v in state_dict.items()}
                 pattern = f"cross_attn.{i}", f"transformers.{i}.cross_attn"
                 state_dict = {k.replace(*pattern): v for k, v in state_dict.items()}
-            missing, unexpected = self.load_state_dict(state_dict, strict=False)
-            print("Missing keys:")
-            for k in missing:
-                print(k)
-            print("Unexpected keys:")
-            for k in unexpected:
-                print(k)
+            self.load_state_dict(state_dict, strict=False)
 
         self.register_buffer(
             "confidence_thresholds",
@@ -456,30 +396,6 @@ class LightGlue(nn.Module):
                 [self.confidence_threshold(i) for i in range(self.conf.n_layers)]
             ),
         )
-        
-
-        for _, param in self.named_parameters():
-                param.requires_grad = True
-
-        if self.conf.get("freeze_backbone", False):
-            unfreeze_keywords = ["posenc3d", "transformers.7", "transformers.8"]
-            print(f"[*] Manual Log: Freeze Backbone, except for: {unfreeze_keywords}")
-
-            for name, param in self.named_parameters():
-    
-                if not any(key in name for key in unfreeze_keywords):
-                    param.register_hook(lambda grad: torch.zeros_like(grad))
-
-        #     for name, param in self.named_parameters():
-        #         if any(key in name for key in unfreeze_keywords):
-        #             param.requires_grad = True
-        #             # print(f"[*] Manual Log: Unfrozen parameter: {name}") # only for debugging
-        #         else:
-        #             param.requires_grad = False
-        else:
-            print("[*] Manual Log: Unfreeze mode. Training everything.")
-        #     for _, param in self.named_parameters():
-        #         param.requires_grad = True
 
     def compile(self, mode="reduce-overhead"):
         if self.conf.width_confidence != -1:
@@ -500,23 +416,12 @@ class LightGlue(nn.Module):
         kpts0, kpts1 = data["keypoints0"], data["keypoints1"]
         b, m, _ = kpts0.shape
         b, n, _ = kpts1.shape
-        mask0 = data.get("mask0", None)
-        mask1 = data.get("mask1", None)
         device = kpts0.device
         if "view0" in data.keys() and "view1" in data.keys():
             size0 = data["view0"].get("image_size")
             size1 = data["view1"].get("image_size")
-        # TODO: Using bounding boxs for now
-        else:
-            size0 = kpts0.max(dim=1).values - kpts0.min(dim=1).values
-            size0 = torch.clamp(size0, min=1e-6)
-
-            size1_3d = kpts1.max(dim=1).values - kpts1.min(dim=1).values
-            size1_3d = torch.clamp(size1_3d, min=1e-6)
-            size1 = size1_3d
         kpts0 = normalize_keypoints(kpts0, size0).clone()
-        # kpts1 = normalize_keypoints(kpts1, size1).clone()
-        kpts1 = normalize_3d_with_quantile(kpts1, quantile_value=0.975).clone()
+        kpts1 = normalize_keypoints(kpts1, size1).clone()
 
         if self.conf.add_scale_ori:
             sc0, o0 = data["scales0"], data["oris0"]
@@ -550,8 +455,7 @@ class LightGlue(nn.Module):
         desc1 = self.input_proj(desc1)
         # cache positional embeddings
         encoding0 = self.posenc(kpts0)
-        # encoding1 = self.posenc(kpts1)
-        encoding1 = self.posenc3d(kpts1) # 3d positional encoding
+        encoding1 = self.posenc(kpts1)
 
         # GNN + final_proj + assignment
         do_early_stop = self.conf.depth_confidence > 0 and not self.training
@@ -569,17 +473,15 @@ class LightGlue(nn.Module):
         for i in range(self.conf.n_layers):
             if self.conf.checkpointed and self.training:
                 desc0, desc1 = torch.utils.checkpoint.checkpoint(
-                        self.transformers[i],
-                        desc0,
-                        desc1,
-                        encoding0,
-                        encoding1,
-                        mask0,
-                        mask1,
-                        use_reentrant=False, # Recommended by torch, default was True
-                    )
+                    self.transformers[i],
+                    desc0,
+                    desc1,
+                    encoding0,
+                    encoding1,
+                    use_reentrant=False,  # Recommended by torch, default was True
+                )
             else:
-                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1, mask0, mask1)
+                desc0, desc1 = self.transformers[i](desc0, desc1, encoding0, encoding1)
             if self.training or i == self.conf.n_layers - 1:
                 all_desc0.append(desc0)
                 all_desc1.append(desc1)
@@ -598,8 +500,6 @@ class LightGlue(nn.Module):
                 keep0 = torch.where(prunemask0)[1]
                 ind0 = ind0.index_select(1, keep0)
                 desc0 = desc0.index_select(1, keep0)
-                if mask0 is not None:
-                    mask0 = mask0.index_select(1, keep0)
                 encoding0 = encoding0.index_select(-2, keep0)
                 prune0[:, ind0] += 1
                 scores1 = self.log_assignment[i].get_matchability(desc1)
@@ -607,13 +507,11 @@ class LightGlue(nn.Module):
                 keep1 = torch.where(prunemask1)[1]
                 ind1 = ind1.index_select(1, keep1)
                 desc1 = desc1.index_select(1, keep1)
-                if mask1 is not None:
-                    mask1 = mask1.index_select(1, keep1)
                 encoding1 = encoding1.index_select(-2, keep1)
                 prune1[:, ind1] += 1
 
         desc0, desc1 = desc0[..., :m, :], desc1[..., :n, :]
-        scores, _ = self.log_assignment[i](desc0, desc1, mask0, mask1)
+        scores, _ = self.log_assignment[i](desc0, desc1)
         m0, m1, mscores0, mscores1 = filter_matches(scores, self.conf.filter_threshold)
 
         if do_point_pruning:
@@ -678,27 +576,9 @@ class LightGlue(nn.Module):
             return self.pruning_keypoint_thresholds[device.type]
 
     def loss(self, pred, data):
-
-        if "gt_assignment" not in data and "gt_matches0" in data:
-            m, n = data["gt_matches0"].shape[-1], data["gt_matches1"].shape[-1]
-            batch_size = data["gt_matches0"].shape[0]
-            device = data["gt_matches0"].device
-
-            gt_assignment = torch.zeros((batch_size, m, n), device=device)
-            for b in range(batch_size):
-                m0 = data["gt_matches0"][b]
-                valid_mask = m0 != -1
-                if valid_mask.any():
-                    indices_2d = torch.where(valid_mask)[0]
-                    indices_3d = m0[valid_mask].long()
-                    gt_assignment[b, indices_2d, indices_3d] = 1.0
-            data["gt_assignment"] = gt_assignment
-
-        mask0 = data.get("mask0", None)
-        mask1 = data.get("mask1", None)
         def loss_params(pred, i):
             la, _ = self.log_assignment[i](
-                pred["ref_descriptors0"][:, i], pred["ref_descriptors1"][:, i], mask0, mask1
+                pred["ref_descriptors0"][:, i], pred["ref_descriptors1"][:, i]
             )
             return {
                 "log_assignment": la,
