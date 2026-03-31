@@ -17,7 +17,7 @@ def run_nn_eval():
         "data": {
             "name": "mega_2d3d_dataset",
             "root": "/proj/vlarsson/outputs",
-            "split_val": "splits/test.txt", 
+            "split_val": "splits/val.txt", 
             "batch_size": 1,
             "num_workers": 4,
         }
@@ -27,7 +27,7 @@ def run_nn_eval():
     print(f"Using device: {device}")
 
     dataset = get_dataset(conf["data"]["name"])(conf["data"])
-    loader = dataset.get_data_loader("test")
+    loader = dataset.get_data_loader("val")
 
     ModelClass = get_model(conf["model"]["name"])
     full_conf = OmegaConf.merge(ModelClass.default_conf, conf["model"])

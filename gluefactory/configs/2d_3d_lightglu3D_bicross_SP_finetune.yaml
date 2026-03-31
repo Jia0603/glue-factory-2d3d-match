@@ -19,19 +19,19 @@ model:
     nll_balancing: 0.5
 
 data:
-  name: mega_2d3d_dataset
+  name: mega_2d3d_dataset_soft
   root: "/proj/vlarsson/outputs"
   split_train: "splits/train_small.txt"
   split_val: "splits/val.txt"
   split_test: "splits/test.txt"
-  batch_size: 16
+  batch_size: 32
   num_workers: 16
 
 train:
   seed: 0
   epochs: 50
   optimizer: adamw
-  lr: 1e-5 # 1e-4 for 3-10 epochs
+  lr: 1e-5 
   lr_schedule:
     type: "exp" 
     start: 30
@@ -39,7 +39,7 @@ train:
     exp_div_10: 45 # gamma = 0.95
   lr_scaling: [
     [0.0, ["token_confidence."]], # freeze confidence classifier first
-    [0.1, ["self_attn.", "posenc.","cross_attn.to_qk2d"]],
+    [0.1, ["self_attn.", "posenc.","cross_attn.to_qk2d", "cross_attn.to_v2d"]],
     [100, ["dampingnet.const"]]
     ]
   freeze_2d: False

@@ -195,9 +195,8 @@ class CrossBlock(nn.Module):
         inner_dim = dim_head * num_heads
         self.to_qk2d = nn.Linear(embed_dim, inner_dim, bias=bias)
         self.to_qk3d = nn.Linear(embed_dim, inner_dim, bias=bias)
-        self.to_v = nn.Linear(embed_dim, inner_dim, bias=bias)
-        # self.to_v2d = nn.Linear(embed_dim, inner_dim, bias=bias)
-        # self.to_v3d = nn.Linear(embed_dim, inner_dim, bias=bias)
+        self.to_v2d = nn.Linear(embed_dim, inner_dim, bias=bias)
+        self.to_v3d = nn.Linear(embed_dim, inner_dim, bias=bias)
         self.to_out = nn.Linear(inner_dim, embed_dim, bias=bias)
         self.ffn = nn.Sequential(
             nn.Linear(2 * embed_dim, 2 * embed_dim),
@@ -218,9 +217,8 @@ class CrossBlock(nn.Module):
             ) -> List[torch.Tensor]:
         qk0 = self.to_qk2d(x0)
         qk1 = self.to_qk3d(x1)
-        # v0 = self.to_v2d(x0)
-        # v1 = self.to_v3d(x1)
-        v0, v1 = self.map_(self.to_v, x0, x1)
+        v0 = self.to_v2d(x0)
+        v1 = self.to_v3d(x1)
         
         qk0, qk1, v0, v1 = map(
             lambda t: t.unflatten(-1, (self.heads, -1)).transpose(1, 2),
@@ -677,13 +675,20 @@ class LightGlu3D(nn.Module):
             gt_assignment = torch.zeros((batch_size, m, n), device=device)
             for b in range(batch_size):
                 m0 = data["gt_matches0"][b]
-                valid_mask = m0 != -1
+                # valid_mask = m0 != -1
+                valid_mask = m0 >= 0 # for soft threshold
                 if valid_mask.any():
                     indices_2d = torch.where(valid_mask)[0]
                     indices_3d = m0[valid_mask].long()
                     gt_assignment[b, indices_2d, indices_3d] = 1.0
             data["gt_assignment"] = gt_assignment
 
+         # Instruct NLLLOSS to zero the gradient at point -2.
+        if "gt_weights0" not in data:
+            data["gt_weights0"] = (data["gt_matches0"] != -2).float()
+        if "gt_weights1" not in data:
+            data["gt_weights1"] = (data["gt_matches1"] != -2).float()
+            
         mask0 = data.get("mask0", None)
         mask1 = data.get("mask1", None)
         def loss_params(pred, i):

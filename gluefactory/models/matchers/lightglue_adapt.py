@@ -51,7 +51,7 @@ def normalize_3d_with_quantile(
     # scale = dist / 2.0 # Sclale each dimension independently, a method need to be test with
     scale = torch.clamp(scale, min=1e-6)
 
-    kpts_norm = (kpts - shift) / scale
+    kpts_norm = (kpts - shift) / scale * (2 * quantile_value - 1)
 
     return kpts_norm
 
@@ -128,8 +128,7 @@ class Attention(nn.Module):
         if mask is not None:
             if mask.dim() < 4:
                 mask = mask.view(mask.shape[0], 1, 1, -1)
-        
-        assert mask.shape[-1] == k.shape[-2], f"Mask length {mask.shape[-1]} != Key length {k.shape[-2]}"
+            assert mask.shape[-1] == k.shape[-2], f"Mask length {mask.shape[-1]} != Key length {k.shape[-2]}"
 
         if self.enable_flash and q.device.type == "cuda":
             # use torch 2.0 scaled_dot_product_attention with flash
@@ -220,12 +219,22 @@ class CrossBlock(nn.Module):
             lambda t: t.unflatten(-1, (self.heads, -1)).transpose(1, 2),
             (qk0, qk1, v0, v1),
         )
+
+        if mask0 is not None: # mask -> (B,H,1,seq_len)
+            if mask0.dim() == 2:
+                mask0 = mask0[:, None, None, :]
+            elif mask0.dim() == 3:
+                mask0 = mask0[:, None, :, :]
+        if mask1 is not None: # mask -> (B,H,1,seq_len)
+            if mask1.dim() == 2:
+                mask1 = mask1[:, None, None, :]
+            elif mask1.dim() == 3:
+                mask1 = mask1[:, None, :, :]
+
         if self.flash is not None and qk0.device.type == "cuda":
             m0 = self.flash(qk0, qk1, v1, mask1)
             m1 = self.flash(qk1, qk0, v0, mask0)
-            # m1 = self.flash(
-            #     qk1, qk0, v0, mask.transpose(-1, -2) if mask is not None else None
-            # )
+            
         else:
             batch_size = x0.shape[0]
             mask = None
@@ -273,12 +282,10 @@ class TransformerLayer(nn.Module):
 
     # This part is compiled and allows padding inputs
     def masked_forward(self, desc0, desc1, encoding0, encoding1, mask0, mask1):
-        # mask = mask0 & mask1.transpose(-1, -2)
-        # mask0 = mask0 & mask0.transpose(-1, -2)
-        # mask1 = mask1 & mask1.transpose(-1, -2)
+        
         desc0 = self.self_attn(desc0, encoding0, mask0)
         desc1 = self.self_attn(desc1, encoding1, mask1)
-        # return self.cross_attn(desc0, desc1, mask)
+        
         return self.cross_attn(desc0, desc1, mask0, mask1)
 
 
@@ -464,38 +471,14 @@ class LightGlue(nn.Module):
                 [self.confidence_threshold(i) for i in range(self.conf.n_layers)]
             ),
         )
-        
-
-        # for _, param in self.named_parameters():
-        #         param.requires_grad = True
-
-        # if self.conf.get("freeze_backbone", False):
-        #     unfreeze_keywords = ["posenc3d", "transformers.7", "transformers.8"]
-        #     print(f"[*] Manual Log: Freeze Backbone, except for: {unfreeze_keywords}")
-
-        #     for name, param in self.named_parameters():
-    
-        #         if not any(key in name for key in unfreeze_keywords):
-        #             param.register_hook(lambda grad: torch.zeros_like(grad))
-
-        # #     for name, param in self.named_parameters():
-        # #         if any(key in name for key in unfreeze_keywords):
-        # #             param.requires_grad = True
-        # #             # print(f"[*] Manual Log: Unfrozen parameter: {name}") # only for debugging
-        # #         else:
-        # #             param.requires_grad = False
-        # else:
-        #     print("[*] Manual Log: Unfreeze mode. Training everything.")
-        # #     for _, param in self.named_parameters():
-        # #         param.requires_grad = True
 
         # Freeze weights except the newly added adapter and 3d positional encoding
         if self.conf.get("freeze_backbone", True):
             # unfreeze_keywords = ["adapter_3d", "posenc3d"]
             unfreeze_keywords = [
                 "adapter_3d", "posenc3d", 
-                "transformers.7", "transformers.8", 
-                "log_assignment.7", "log_assignment.8"
+                # "transformers.7", "transformers.8", 
+                # "log_assignment.7", "log_assignment.8"
             ]
 
             print(f"[*] Manual Log: Freezing Backbone. Only training: {unfreeze_keywords}")
@@ -540,11 +523,7 @@ class LightGlue(nn.Module):
             size0 = kpts0.max(dim=1).values - kpts0.min(dim=1).values
             size0 = torch.clamp(size0, min=1e-6)
 
-            size1_3d = kpts1.max(dim=1).values - kpts1.min(dim=1).values
-            size1_3d = torch.clamp(size1_3d, min=1e-6)
-            size1 = size1_3d
         kpts0 = normalize_keypoints(kpts0, size0).clone()
-        # kpts1 = normalize_keypoints(kpts1, size1).clone()
         kpts1 = normalize_3d_with_quantile(kpts1, quantile_value=0.975).clone()
 
         if self.conf.add_scale_ori:
@@ -582,7 +561,6 @@ class LightGlue(nn.Module):
 
         # cache positional embeddings
         encoding0 = self.posenc(kpts0)
-        # encoding1 = self.posenc(kpts1)
         encoding1 = self.posenc3d(kpts1) # 3d positional encoding
 
         # GNN + final_proj + assignment
@@ -620,8 +598,9 @@ class LightGlue(nn.Module):
             # only for eval
             if do_early_stop:
                 assert b == 1
+                actual_m, actual_n = int(mask0.sum()), int(mask1.sum())
                 token0, token1 = self.token_confidence[i](desc0, desc1)
-                if self.check_if_stop(token0[..., :m, :], token1[..., :n, :], i, m + n):
+                if self.check_if_stop(token0[..., :actual_m, :], token1[..., :actual_n, :], i, actual_m + actual_n):
                     break
             if do_point_pruning:
                 assert b == 1
@@ -644,7 +623,7 @@ class LightGlue(nn.Module):
                 encoding1 = encoding1.index_select(-2, keep1)
                 prune1[:, ind1] += 1
 
-        desc0, desc1 = desc0[..., :m, :], desc1[..., :n, :]
+        # desc0, desc1 = desc0[..., :m, :], desc1[..., :n, :]
         scores, _ = self.log_assignment[i](desc0, desc1, mask0, mask1)
         m0, m1, mscores0, mscores1 = filter_matches(scores, self.conf.filter_threshold)
 
