@@ -15,9 +15,9 @@ def run_nn_eval():
             "distance_thresh": 0.75,
         },
         "data": {
-            "name": "mega_2d3d_dataset",
+            "name": "mega_2d3d_dataset_soft",
             "root": "/proj/vlarsson/outputs",
-            "split_val": "splits/val.txt", 
+            "split_val": "splits/test.txt", 
             "batch_size": 1,
             "num_workers": 4,
         }
@@ -49,17 +49,25 @@ def run_nn_eval():
         with torch.no_grad():
             pred = model(data)
 
-        matches = pred['matches0'][0] # [N]
-        gt_matches = data['gt_matches0'][0] # [N]
+        # matches = pred['matches0'][0] # [N]
+        # gt_matches = data['gt_matches0'][0] # [N]
+        matches = pred['matches0']
+        gt_matches = data['gt_matches0']
         
-        correct_matches = (matches == gt_matches) & (gt_matches > -1)
+        mask = ((matches > -1) & (gt_matches >= -1)).float()
+        correct_matches = ((matches == gt_matches) * mask).sum(1)
+        # correct_matches = (matches == gt_matches) & (gt_matches > -1)
         
         num_pred = (matches > -1).sum().item()
-        num_gt = (gt_matches > -1).sum().item()
-        num_correct = correct_matches.sum().item()
+        # num_gt = (gt_matches > -1).sum().item()
+        # num_correct = correct_matches.sum().item()
 
-        precision = num_correct / (1e-8 + num_pred)
-        recall = num_correct / (1e-8 + num_gt)
+        # precision = num_correct / (1e-8 + num_pred)
+        # recall = num_correct / (1e-8 + num_gt)
+
+        recall_mask = (gt_matches > -1).float()
+        precision = correct_matches / (1e-8 + mask.sum(1))
+        recall =  ((matches == gt_matches) * recall_mask).sum(1) / (1e-8 + recall_mask.sum(1))
         
         results["num_matches"].append(num_pred)
         results["precision"].append(precision)

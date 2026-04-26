@@ -16,12 +16,13 @@ model:
   loss:
     gamma: 1.0
     fn: nll
-    nll_balancing: 0.5
+    nll_balancing: 0.2
+  3d_rotation_aug: True
 
 data:
   name: mega_2d3d_dataset_soft
   root: "/proj/vlarsson/outputs"
-  split_train: "splits/train.txt"
+  split_train: "splits/train_small.txt"
   split_val: "splits/val.txt"
   split_test: "splits/test.txt"
   batch_size: 32
@@ -29,7 +30,7 @@ data:
 
 train:
   seed: 0
-  epochs: 50
+  epochs: 60
   optimizer: adamw
   lr: 1e-5 
   lr_schedule:

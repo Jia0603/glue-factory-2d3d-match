@@ -29,7 +29,8 @@ def normalize_keypoints(
     kpts: torch.Tensor, size: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     if size is None:
-        size = 1 + kpts.max(-2).values - kpts.min(-2).values
+        # size = 1 + kpts.max(-2).values - kpts.min(-2).values
+        size = kpts.max(-2).values
     elif not isinstance(size, torch.Tensor):
         size = torch.tensor(size, device=kpts.device, dtype=kpts.dtype)
     size = size.to(kpts)
@@ -54,6 +55,24 @@ def normalize_3d_with_quantile(
     kpts_norm = (kpts - shift) / scale * (2 * quantile_value - 1)
 
     return kpts_norm
+
+def apply_y_axis_rotation(kpts3d: torch.Tensor) -> torch.Tensor:
+
+    device = kpts3d.device
+    batch_size = kpts3d.shape[0]
+
+    theta = torch.rand(batch_size, device=device) * 2 * torch.pi # random angle ~ [0, 2*pi]
+    cos_t = torch.cos(theta)
+    sin_t = torch.sin(theta)
+
+    ones = torch.ones_like(cos_t)
+    zeros = torch.zeros_like(cos_t)
+    row1 = torch.stack([cos_t,  zeros, sin_t], dim=-1)
+    row2 = torch.stack([zeros,  ones,  zeros], dim=-1)
+    row3 = torch.stack([-sin_t, zeros, cos_t], dim=-1)
+    R = torch.stack([row1, row2, row3], dim=1) # rotation matrix R of shape (B, 3, 3)
+
+    return torch.bmm(kpts3d, R)
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     x = x.unflatten(-1, (-1, 2))
@@ -394,6 +413,7 @@ class LightGlu3D(nn.Module):
             "fn": "nll",
             "nll_balancing": 0.5,
         },
+        "3d_rotation_aug": False, # apply random y-axis rotation for 3D keypoints during training
     }
 
     required_data_keys = ["keypoints0", "keypoints1", "descriptors0", "descriptors1"]
@@ -494,17 +514,20 @@ class LightGlu3D(nn.Module):
         b, n, _ = kpts1.shape
         mask0 = data.get("mask0", None)
         mask1 = data.get("mask1", None)
+        size0 = data.get("size0", None)
         device = kpts0.device
-        if "view0" in data.keys() and "view1" in data.keys():
+        if "view0" in data.keys():
             size0 = data["view0"].get("image_size")
-            size1 = data["view1"].get("image_size")
         # TODO: Using bounding boxs for now
-        else:
-            size0 = kpts0.max(dim=1).values - kpts0.min(dim=1).values
-            size0 = torch.clamp(size0, min=1e-6)
+        # else:
+        #     size0 = kpts0.max(dim=1).values - kpts0.min(dim=1).values
+        #     size0 = torch.clamp(size0, min=1e-6)
 
         kpts0 = normalize_keypoints(kpts0, size0).clone()
         kpts1 = normalize_3d_with_quantile(kpts1, quantile_value=0.975).clone()
+
+        if self.training and self.conf.get("3d_rotation_aug", False):
+            kpts1 = apply_y_axis_rotation(kpts1)
 
         if self.conf.add_scale_ori:
             sc0, o0 = data["scales0"], data["oris0"]

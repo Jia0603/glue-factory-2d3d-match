@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH -A berzelius-2025-319 
+#SBATCH -A berzelius-2026-113
 #SBATCH -J lightglu3d_adapt       
-#SBATCH -t 00-06:00:00               
-#SBATCH -o /home/x_jiagu/degree_project/log_file/lightglue+adapter_2thread_bat32_1e-5_47scenes%j.log
+#SBATCH -t 00-10:00:00               
+#SBATCH -o /home/x_jiagu/degree_project/log_file/lightglue+SwiLUadapter_2thread_bat32_1e-5_47scenes%j.log
 
 #SBATCH -p berzelius
 #SBATCH --nodes=1
@@ -18,5 +18,5 @@ echo "CUDA visible devices: $CUDA_VISIBLE_DEVICES"
 nvidia-smi
 
 python -m gluefactory.train_new --mp bfloat16 \
-    --conf gluefactory/configs/2d_3d_lightglue_adapt_SP_finetune.yaml lightglue+adapter_2thread_bat32_1e-5_47scenes \
-    --distributed --no_eval_0
+    --conf gluefactory/configs/2d_3d_lightglue_adapt_SP_finetune.yaml lightglue+SwiLUadapter_2thread_bat32_1e-5_47scenes \
+    --distributed --no_eval_0 --restore

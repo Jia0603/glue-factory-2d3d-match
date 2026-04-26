@@ -16,7 +16,8 @@ model:
   loss:
     gamma: 1.0
     fn: nll
-    nll_balancing: 0.5
+    nll_balancing: 0.2
+  3d_rotation_aug: True
 
 data:
   name: mega_2d3d_dataset_soft
@@ -32,11 +33,11 @@ train:
   epochs: 50
   optimizer: adamw
   lr: 1e-5 
-  lr_schedule:
-    type: "exp" 
-    start: 30
-    on_epoch: True
-    exp_div_10: 45 # gamma = 0.95
+  # lr_schedule:
+  #   type: "exp" 
+  #   start: 30
+  #   on_epoch: True
+  #   exp_div_10: 45 # gamma = 0.95
   lr_scaling: [
     [0.0, ["token_confidence."]], # freeze confidence classifier first
     [0.1, ["self_attn.", "posenc.","cross_attn.to_qk2d", "cross_attn.to_v2d"]],

@@ -367,6 +367,24 @@ def filter_matches(scores: torch.Tensor, th: float):
     return m0, m1, mscores0, mscores1
 
 
+class SwiGLUAdaptor(nn.Module):
+    def __init__(self, dim=256, expansion_factor=2):
+        super().__init__()
+        hidden_dim = int(dim * expansion_factor)
+        self.ln = nn.LayerNorm(dim)
+        self.w1 = nn.Linear(dim, hidden_dim)
+        self.w2 = nn.Linear(dim, hidden_dim)
+        self.w3 = nn.Linear(hidden_dim, dim)
+
+    def forward(self, x):
+        # residual + Pre-LN
+        residual = x
+        x = self.ln(x)
+        # x = (w1(x) * SiLU(w2(x))) * w3
+        gate = F.silu(self.w2(x))
+        x = self.w3(self.w1(x) * gate)
+        return x + residual
+    
 class LightGlue(nn.Module):
     default_conf = {
         "name": "lightglue",  # just for interfacing
@@ -413,12 +431,14 @@ class LightGlue(nn.Module):
         h, n, d = conf.num_heads, conf.n_layers, conf.descriptor_dim
 
         # Define the Adapter for 3D features
-        self.adapter_3d = nn.Sequential(
-            nn.Linear(conf.descriptor_dim, conf.descriptor_dim * 2),
-            nn.GELU(),
-            nn.Linear(conf.descriptor_dim * 2, conf.descriptor_dim),
-            nn.LayerNorm(conf.descriptor_dim)
-        )
+        # self.adapter_3d = nn.Sequential(
+        #     nn.Linear(conf.descriptor_dim, conf.descriptor_dim * 2),
+        #     nn.GELU(),
+        #     nn.Linear(conf.descriptor_dim * 2, conf.descriptor_dim),
+        #     nn.LayerNorm(conf.descriptor_dim)
+        # )
+
+        self.adapter_3d = SwiGLUAdaptor(conf.descriptor_dim, expansion_factor=2)
 
         self.transformers = nn.ModuleList(
             [TransformerLayer(d, h, conf.flash) for _ in range(n)]

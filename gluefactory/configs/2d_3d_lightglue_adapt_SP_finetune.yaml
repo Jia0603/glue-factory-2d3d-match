@@ -26,7 +26,7 @@ data:
 
 train:
   seed: 0
-  epochs: 40
+  epochs: 50
   optimizer: adamw
   lr: 1e-5 
   lr_schedule:
@@ -34,6 +34,11 @@ train:
     start: 30
     on_epoch: True
     exp_div_10: 45 # gamma = 0.95
+  # lr_scaling: [
+  #   [0.0, ["token_confidence."]], # freeze confidence classifier first
+  #   [0.1, ["self_attn.", "posenc.", "cross_attn.", "log_assignment."]],
+  #   [100, ["dampingnet.const"]]
+  #   ]
   log_every_iter: 50    
   eval_every_iter: 200
   save_every_iter: 400

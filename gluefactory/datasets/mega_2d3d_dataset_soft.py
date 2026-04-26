@@ -173,9 +173,11 @@ class Torch2D3D(Dataset):
             query_feats, p3d_feats, camera, depth_map
         )
         
-        width = camera['intrinsics']['width']
-        height = camera['intrinsics']['height']
-        size0 = torch.tensor([width, height]).float()
+        # width = camera['intrinsics']['width']
+        # height = camera['intrinsics']['height']
+        # size0 = torch.tensor([width, height]).float()
+
+        size0 = torch.from_numpy(query_feats["image_size"]).float()
         size1 = torch.tensor([1.0, 1.0, 1.0]).float()
         
         kpts3d = torch.from_numpy(p3d_feats["keypoints"]).float()
@@ -386,6 +388,7 @@ class Torch2D3D(Dataset):
             query_feature_dict["descriptors"] = ds["descriptors"][:]
             query_feature_dict["scores"] = ds["scores"][:]
             query_feature_dict["keypoints"] = ds["keypoints"][:]
+            query_feature_dict["image_size"] = ds["image_size"][:]
 
         # print(f"Collected descriptors for query image {img_name}.")
         
@@ -431,6 +434,10 @@ class MegaDepth2D3D(BaseDataset):
         samples = []
         for scene in scenes:
             query_path = Path(self.root) / "query_sets" / scene
+            # if split_file == self.conf.split_train:
+            #     query_names_file = query_path / "query_image_names_50_100.txt"
+            # else:
+            #     query_names_file = query_path / "query_image_names_clean.txt"
             query_names_file = query_path / "query_image_names_clean.txt"
             if not query_names_file.exists():
                 continue
