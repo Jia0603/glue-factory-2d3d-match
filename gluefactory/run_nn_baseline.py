@@ -15,16 +15,19 @@ def run_nn_eval():
             "distance_thresh": 0.75,
         },
         "data": {
-            "name": "mega_2d3d_dataset_soft",
+            "name": "mega_2d3d_dataset_soft_fix_pad",
             "root": "/proj/vlarsson/outputs",
             "split_val": "splits/test.txt", 
             "batch_size": 1,
             "num_workers": 4,
+            "pos_reproj_thresh": 3.0,
+            "neg_reproj_thresh": 8.0
         }
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    print(f"pos_reproj_thresh:{conf['data']['pos_reproj_thresh']}; neg_reproj_thresh:{conf['data']['neg_reproj_thresh']}.")
 
     dataset = get_dataset(conf["data"]["name"])(conf["data"])
     loader = dataset.get_data_loader("val")
@@ -70,8 +73,8 @@ def run_nn_eval():
         recall =  ((matches == gt_matches) * recall_mask).sum(1) / (1e-8 + recall_mask.sum(1))
         
         results["num_matches"].append(num_pred)
-        results["precision"].append(precision)
-        results["recall"].append(recall)
+        results["precision"].append(precision.item())
+        results["recall"].append(recall.item())
 
     print("\n" + "="*30)
     print(f"NN Baseline Results:")

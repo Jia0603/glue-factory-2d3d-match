@@ -234,7 +234,7 @@ class Torch2D3D(Dataset):
         kpts_pad = torch.zeros(maxN, d)
         desc_pad = torch.zeros(maxN, D)
         mask = torch.zeros(maxN, dtype=torch.bool)
-        matches_pad = torch.full((maxN,), -1, dtype=torch.long)
+        matches_pad = torch.full((maxN,), -2, dtype=torch.long)
 
         kpts_pad[:N] = kpts
         desc_pad[:N] = desc
@@ -330,7 +330,9 @@ class Torch2D3D(Dataset):
                 # Scatter back to the original N3D sized arrays
                 rel_error[valid_proj] = rel_err_valid
                 has_valid_depth[valid_proj] = valid_d
-
+                # Filter the points that have depth but bigger than neg_thresh
+                depth_is_totally_wrong = has_valid_depth & (rel_error > self.neg_depth_thresh)
+                valid_proj &= (~depth_is_totally_wrong)
         # Combine u,v into (N3D, 2)
         projected = torch.stack([u, v], dim=1)
         
@@ -340,39 +342,37 @@ class Torch2D3D(Dataset):
         # Mask out points that projected behind the camera or off-screen
         dist_matrix[~valid_proj] = float('inf')
 
-        # Get minimum distance to a 2D point for every 3D point
-        min_dists, min_indices = torch.min(dist_matrix, dim=1) # (N3D,)
-
-        # Filter only points that passed the loose negative threshold
-        valid_mask = min_dists <= self.neg_reproj_thresh
-        valid_3d_indices = torch.where(valid_mask)[0]
+        # Prepare for MNN assignment
+        min_dist_3d_indices_for_2d = torch.argmin(dist_matrix, dim=0)
+        min_dist_2d_indices_for_3d = torch.argmin(dist_matrix, dim=1)
+        has_dist_mask = dist_matrix <= self.neg_reproj_thresh
+        valid_2d_indices = torch.where(has_dist_mask)[1].unique()
         
-        # Loop over only the valid subset to prevent assignment collisions
-        for idx3d in valid_3d_indices: # loop over 3Ds
-            # dist_matrix[idx3d] >0 < neg_reproj_thresh # assign all the exsiting mathces as IGNORED
-            min_idx_2d = min_indices[idx3d]
-            dist = min_dists[idx3d]
-            r_err = rel_error[idx3d]
-            valid_d = has_valid_depth[idx3d]
-            if valid_d: # loop over 2Ds
-                # STRICT MATCH
-                if dist <= self.pos_reproj_thresh and r_err <= self.pos_depth_thresh:
-                    if matches0[min_idx_2d] in [UNMATCHED_FEATURE, IGNORE_FEATURE]:
-                        matches0[min_idx_2d] = idx3d
-                        matches1[idx3d] = min_idx_2d
-                # IGNORE MATCH
-                elif dist <= self.neg_reproj_thresh and r_err <= self.neg_depth_thresh:
-                    if matches0[min_idx_2d] == UNMATCHED_FEATURE:
-                        matches0[min_idx_2d] = IGNORE_FEATURE
-                    if matches1[idx3d] == UNMATCHED_FEATURE:
-                        matches1[idx3d] = IGNORE_FEATURE
-            else:
-                # MISSING DEPTH -> IGNORE MATCH
-                if dist <= self.neg_reproj_thresh:
-                    if matches0[min_idx_2d] == UNMATCHED_FEATURE:
-                        matches0[min_idx_2d] = IGNORE_FEATURE
-                    if matches1[idx3d] == UNMATCHED_FEATURE:
-                        matches1[idx3d] = IGNORE_FEATURE
+        for idx2d in valid_2d_indices: # loop over valid 2d kpts
+            # first assign all the existing mathes < neg_reproj_thresh as IGNORED
+            has_dist_3d_idx = torch.where(has_dist_mask[:, idx2d])[0]
+            if matches0[idx2d] == UNMATCHED_FEATURE:
+                matches0[idx2d] = IGNORE_FEATURE
+            for id in has_dist_3d_idx:
+                if matches1[id] == UNMATCHED_FEATURE:
+                    matches1[id] = IGNORE_FEATURE
+
+            min_dist_3d_idx = min_dist_3d_indices_for_2d[idx2d]
+            is_mutual = (min_dist_2d_indices_for_3d[min_dist_3d_idx] == idx2d)
+            if is_mutual:
+            # If mutual nearest neighbours, check if assigned as STRICT
+                cur_min_dist = dist_matrix[min_dist_3d_idx, idx2d]
+                r_err = rel_error[min_dist_3d_idx]
+                valid_d = has_valid_depth[min_dist_3d_idx]
+                if valid_d: # if has depth
+                    if cur_min_dist <= self.pos_reproj_thresh and r_err <= self.pos_depth_thresh:
+                        if (matches0[idx2d] in [UNMATCHED_FEATURE, IGNORE_FEATURE]) and \
+                            (matches1[min_dist_3d_idx] in [UNMATCHED_FEATURE, IGNORE_FEATURE]):
+                            matches0[idx2d] = min_dist_3d_idx
+                            matches1[min_dist_3d_idx] = idx2d
+                else: # if no depth provided
+                    if matches1[min_dist_3d_idx] == UNMATCHED_FEATURE:
+                        matches1[min_dist_3d_idx] = IGNORE_FEATURE
 
         return matches0.numpy(), matches1.numpy()
     

@@ -1,9 +1,9 @@
 experiment:
-  name: lightglu3d_bicross
+  name: lightglu3d_no_sigma3d
   seed: 0
 
 model:
-  name: lightglu3d_bicross
+  name: lightglu3d_no_sigma3d
   weights: "/home/x_jiagu/glue-factory/superpoint_lightglue.pth"
   input_dim: 256
   descriptor_dim: 256
@@ -16,26 +16,28 @@ model:
   loss:
     gamma: 1.0
     fn: nll
-    nll_balancing: 0.2
+    nll_balancing: 0.5
   3d_rotation_aug: True
 
 data:
-  name: mega_2d3d_dataset_soft
+  name: mega_2d3d_dataset_soft_fix_pad
   root: "/proj/vlarsson/outputs"
-  split_train: "splits/train_small.txt"
+  split_train: "splits/train_scenes_clean.txt"
   split_val: "splits/val.txt"
   split_test: "splits/test.txt"
   batch_size: 32
-  num_workers: 16
+  num_workers: 12
+  pos_reproj_thresh: 3.0
+  neg_reproj_thresh: 8.0
 
 train:
   seed: 0
-  epochs: 60
+  epochs: 30
   optimizer: adamw
   lr: 1e-5 
   lr_schedule:
     type: "exp" 
-    start: 30
+    start: 15
     on_epoch: True
     exp_div_10: 45 # gamma = 0.95
   lr_scaling: [

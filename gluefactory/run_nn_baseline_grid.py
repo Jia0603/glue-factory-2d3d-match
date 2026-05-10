@@ -7,7 +7,7 @@ import numpy as np
 def run_nn_grid_search():
 
     data_conf = {
-        "name": "mega_2d3d_dataset",
+        "name": "mega_2d3d_dataset_soft_fix_pad",
         "root": "/proj/vlarsson/outputs",
         "split_val": "splits/val.txt", 
         "batch_size": 1,
@@ -24,7 +24,7 @@ def run_nn_grid_search():
     # Define the grid
     mutual_checks = [True, False]
     ratio_thresholds = [None, 0.5, 0.7, 0.8, 0.9]
-    distance_thresholds = [None, 0.5, 0.75, 1.0]
+    distance_thresholds = [None, 0.25, 0.5, 0.75]
 
     all_results = []
     best_f1 = -1
@@ -62,18 +62,17 @@ def run_nn_grid_search():
                     with torch.no_grad():
                         pred = model(data)
 
-                    matches = pred['matches0'][0] 
-                    gt_matches = data['gt_matches0'][0] 
+                    matches = pred['matches0'] 
+                    gt_matches = data['gt_matches0']
                     
-                    valid_matches = (matches > -1)
-                    correct_matches = (matches == gt_matches) & (gt_matches > -1)
+                    mask = ((matches > -1) & (gt_matches >= -1)).float()
+                    correct_matches = ((matches == gt_matches) * mask).sum(1)
                     
-                    num_pred = valid_matches.sum().item()
-                    num_gt = (gt_matches > -1).sum().item()
-                    num_correct = correct_matches.sum().item()
+                    num_pred = (matches > -1).sum().item()
 
-                    precision = num_correct / num_pred if num_pred > 0 else 0
-                    recall = num_correct / num_gt if num_gt > 0 else 0
+                    recall_mask = (gt_matches > -1).float()
+                    precision = correct_matches / (1e-8 + mask.sum(1))
+                    recall =  ((matches == gt_matches) * recall_mask).sum(1) / (1e-8 + recall_mask.sum(1))
                     
                     scene_precisions.append(precision)
                     scene_recalls.append(recall)
