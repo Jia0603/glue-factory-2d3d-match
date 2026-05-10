@@ -18,5 +18,5 @@ echo "CUDA visible devices: $CUDA_VISIBLE_DEVICES"
 nvidia-smi
 
 python -m gluefactory.train_new --mp bfloat16 \
-    --conf gluefactory/configs/2d_3d_lightglu3D_bicross_SP_finetune.yaml funi_SoftMax_bat32_1e-5 \
+    --conf gluefactory/configs/2d_3d_lightglu3D_bicross_SP_finetune.yaml uni_SoftMax_bat32_1e-5 \
     --distributed --no_eval_0

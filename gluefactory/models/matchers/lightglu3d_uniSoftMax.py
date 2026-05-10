@@ -336,12 +336,13 @@ def sigmoid_log_double_softmax(
         sim = sim.masked_fill(~mask_2d, -1e9) 
         z0 = z0.masked_fill(~mask0.view(b, m, 1), -1e9)
         z1 = z1.masked_fill(~mask1.view(b, n, 1), -1e9)
-    # certainties = F.logsigmoid(z0) + F.logsigmoid(z1).transpose(1, 2)
-    certainties = F.logsigmoid(z0) # only consider 2D SoftMax
+    certainties = F.logsigmoid(z0) + F.logsigmoid(z1).transpose(1, 2)
+    # certainties = F.logsigmoid(z0) 
     scores0 = F.log_softmax(sim, 2)
     scores1 = F.log_softmax(sim.transpose(-1, -2).contiguous(), 2).transpose(-1, -2)
     scores = sim.new_full((b, m + 1, n + 1), 0)
-    scores[:, :m, :n] = scores0 + scores1 + certainties
+    # scores[:, :m, :n] = scores0 + scores1 + certainties
+    scores[:, :m, :n] = scores0 + certainties # only consider 2D SoftMax
     scores[:, :-1, -1] = F.logsigmoid(-z0.squeeze(-1))
     scores[:, -1, :-1] = F.logsigmoid(-z1.squeeze(-1))
     return scores
