@@ -404,7 +404,7 @@ def filter_matches(scores: torch.Tensor, th: float):
 
 class LightGlu3D(nn.Module):
     default_conf = {
-        "name": "lightglu3d_bicross",  # just for interfacing
+        "name": "lightglu3d_uniSoftMax",  # just for interfacing
         "input_dim": 256,  # input descriptor dimension (autoselected from weights)
         "add_scale_ori": False,
         "descriptor_dim": 256,

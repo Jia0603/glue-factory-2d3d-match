@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A berzelius-2026-113 
 #SBATCH -J nosig3d       
-#SBATCH -t 00-06:00:00               
+#SBATCH -t 00-18:00:00               
 #SBATCH -o /home/x_jiagu/degree_project/log_file/no_sigma3d_bat32_1e-5%j.log
 
 #SBATCH -p berzelius
@@ -22,4 +22,5 @@ python -m gluefactory.train_new \
    no_sigma3d_all_bat32_1e-5 \
     --mp bfloat16 \
     --distributed \
-    --no_eval_0
+    --no_eval_0 \
+    --restore
