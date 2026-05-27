@@ -7,7 +7,7 @@ import numpy as np
 def run_nn_grid_search():
 
     data_conf = {
-        "name": "mega_2d3d_dataset_soft_fix_pad",
+        "name": "mega_2d3d_dataset_soft",
         "root": "/proj/vlarsson/outputs",
         "split_val": "splits/val.txt", 
         "batch_size": 1,
