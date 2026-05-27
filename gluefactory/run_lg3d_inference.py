@@ -25,7 +25,7 @@ def run_nn_eval():
         "data": {
             "name": "mega_2d3d_dataset_soft_fix_pad",
             "root": "/proj/vlarsson/outputs",
-            "split_val": "splits/val.txt", 
+            "split_val": "splits/test.txt", 
             "batch_size": 1,
             "num_workers": 4,
             "pos_reproj_thresh": 3.0,

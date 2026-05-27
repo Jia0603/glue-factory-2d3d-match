@@ -1,9 +1,9 @@
 experiment:
-  name: lightglu3d_no_sigma3d
+  name: lightglu3d_bicross
   seed: 0
 
 model:
-  name: lightglu3d_no_sigma3d
+  name: lightglu3d_bicross
   weights: "/home/x_jiagu/glue-factory/superpoint_lightglue.pth"
   input_dim: 256
   descriptor_dim: 256
@@ -20,7 +20,7 @@ model:
   3d_rotation_aug: True
 
 data:
-  name: mega_2d3d_dataset_soft_fix_pad
+  name: mega_2d3d_dataset_soft
   root: "/proj/vlarsson/outputs"
   split_train: "splits/train_scenes_clean.txt"
   split_val: "splits/val.txt"
@@ -51,6 +51,3 @@ train:
   eval_every_iter: 200
   save_every_iter: 400
 
-val:
-  interval: 1
-  recall_metrics: [1, 3, 5]

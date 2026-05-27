@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -A berzelius-2026-113 
-#SBATCH -J nosig3d       
-#SBATCH -t 00-18:00:00               
-#SBATCH -o /home/x_jiagu/degree_project/log_file/no_sigma3d_bat32_1e-5%j.log
+#SBATCH -J diff_train       
+#SBATCH -t 00-01:00:00               
+#SBATCH -o /home/x_jiagu/degree_project/log_file/test.log
 
 #SBATCH -p berzelius
 #SBATCH --nodes=1
@@ -19,8 +19,7 @@ nvidia-smi
 
 python -m gluefactory.train_new \
     --conf gluefactory/configs/2d_3d_lightglu3D_bicross_SP_finetune_n.yaml \
-   no_sigma3d_all_bat32_1e-5 \
+   test \
     --mp bfloat16 \
     --distributed \
-    --no_eval_0 \
-    --restore
+    --no_eval_0
