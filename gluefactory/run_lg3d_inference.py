@@ -23,7 +23,7 @@ def run_nn_eval():
         "weights": "/home/x_jiagu/glue-factory/outputs/training/fix_pad_nll.5_gaussian_0.05_all/checkpoint_best.tar",
         },
         "data": {
-            "name": "mega_2d3d_dataset_soft_fix_pad",
+            "name": "mega_2d3d_dataset_soft",
             "root": "/proj/vlarsson/outputs",
             "split_val": "splits/test.txt", 
             "batch_size": 1,
